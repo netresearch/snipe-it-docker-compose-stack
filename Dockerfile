@@ -193,13 +193,26 @@ WORKDIR /var/www/html
 COPY --from=builder --chown=root:www-data /build /var/www/html
 COPY rootfs/ /
 
-# Surface the dependency manifest for ops debugging
-# (`docker exec snipe-it cat /var/lib/snipeit/deps.txt`), prepare the
-# writable surfaces for the www-data process, and mark entrypoint executable.
-# Single RUN so we ship one image layer instead of three (SonarCloud
-# docker:S7031 — consecutive RUN instructions should be merged).
+# All runtime-stage filesystem setup folded into a single RUN — SonarCloud
+# docker:S7031 (consecutive RUN instructions should be merged). The blocks
+# correspond to:
+#
+#   1. Dependency manifest surfaced for ops debugging
+#      (`docker exec snipe-it cat /var/lib/snipeit/deps.txt`).
+#   2. Writable surfaces for the www-data process — storage, bootstrap
+#      cache, /var/lib/snipeit (user content), and /run/php-fpm (the
+#      socket directory). All are also re-chown'd by entrypoint.sh at
+#      container start to handle fresh named-volume mounts that mask
+#      the image-layer ownership.
+#   3. Entrypoint executable bit.
+#
+# About /run/php-fpm: php-fpm binds its unix socket here. Compose mounts a
+# tmpfs at this path; this mkdir is the fallback for `docker run` of the
+# image standalone. NO TCP port is exposed — socket-only listening closes
+# a FastCGI bypass where any sibling container on the network could speak
+# FastCGI directly, bypassing nginx access control.
 RUN set -eux; \
-    mkdir -p /var/lib/snipeit \
+    mkdir -p /var/lib/snipeit /run/php-fpm \
     && cp /var/www/html/deps-manifest.txt /var/lib/snipeit/deps.txt \
     && chmod 0644 /var/lib/snipeit/deps.txt \
     && rm -f /var/www/html/deps-manifest.txt \
@@ -207,17 +220,8 @@ RUN set -eux; \
         /var/www/html/storage \
         /var/www/html/bootstrap/cache \
         /var/lib/snipeit \
+        /run/php-fpm \
     && chmod 0755 /usr/local/bin/entrypoint.sh
-
-# php-fpm listens on a unix socket at /run/php-fpm/snipeit.sock (shared
-# tmpfs volume between `app` and `web` in compose). NO TCP port exposed.
-# Rationale: closes a FastCGI bypass — with TCP on 0.0.0.0:9000, any
-# sibling container on the snipeit network could speak FastCGI directly,
-# trivially bypassing nginx access control.
-
-# /run/php-fpm must exist for php-fpm to bind the socket — compose mounts
-# a tmpfs here; this RUN is the fallback if the image is run standalone.
-RUN mkdir -p /run/php-fpm && chown www-data:www-data /run/php-fpm
 
 # --start-interval=5s probes every 5s during the 120s start_period instead of
 # waiting up to the full --interval=30s between checks. Means `docker compose
