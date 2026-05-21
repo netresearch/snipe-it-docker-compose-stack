@@ -35,4 +35,4 @@ jobs:
       contents: read
       # needed for nested API calls (Branch-Protection, Webhooks checks)
       actions: read
-    uses: netresearch/.github/.github/workflows/scorecard.yml@5ce9b7d44245a76416317ff3af38589f475e055f  # netresearch/.github main as of 2026-05-21
+    uses: netresearch/.github/.github/workflows/scorecard.yml@main
