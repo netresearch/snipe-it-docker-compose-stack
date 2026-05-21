@@ -19,6 +19,24 @@
       }
     }
   ],
+  "_retention_policy_comment": [
+    "Retention policy (phpbu 6.x):",
+    "  snipeit-db       — capacity 5G   (size-bounded; older dumps drop when total exceeds 5 GiB)",
+    "  snipeit-uploads  — outdated 30D  (time-bounded; archives older than 30 days are removed)",
+    "  snipeit-storage  — outdated 30D  (time-bounded; archives older than 30 days are removed)",
+    "",
+    "Schema constraint: phpbu's `cleanup` field is a single object (one `type`,",
+    "one `options`) per backup — see /app/vendor/phpbu/phpbu/phpbu.schema.json",
+    "in the phpbu-docker image. We cannot stack a capacity gate on top of an",
+    "outdated gate; pick one. If uploads/storage fill the disk before 30 days",
+    "elapse, switch the cleanup type to `capacity` (e.g. `size: 20G`) per backup",
+    "— either edit this file or roll a separate backup entry that targets the",
+    "same dirname with a different cleanup strategy.",
+    "",
+    "Underscore-prefixed keys are ignored by phpbu's loader (they are not in",
+    "the schema's `required` set and the JSON loader skips unknown root keys",
+    "that are not `verbose`/`logging`/`backups`). Treat this block as docs."
+  ],
   "backups": [
     {
       "name": "snipeit-db",

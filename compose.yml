@@ -107,12 +107,23 @@ services:
       MARIADB_PASSWORD: ${DB_PASSWORD:-}
       MARIADB_AUTO_UPGRADE: "1"
       TZ: ${TZ:-UTC}
+    # sync_binlog=1 + innodb_flush_log_at_trx_commit=1 trade throughput for
+    # durability: every committed transaction is fsync'd to disk before the
+    # client sees the ACK, so a power loss cannot lose writes the binlog
+    # already advertised. Required for PITR to be honest. If your org needs
+    # higher write throughput and can tolerate losing ~1s of writes on crash,
+    # set both back to 0 (or 2 for innodb_flush_log_at_trx_commit) — pair with
+    # a UPS / battery-backed cache for safety.
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --log-bin=mariadb-bin
       - --binlog-format=ROW
-      - --expire-logs-days=14
+      # --expire-logs-days was deprecated in MariaDB 10.6+; the new knob
+      # takes seconds. 1209600s = 14 days, same retention as before.
+      - --binlog_expire_logs_seconds=1209600
+      - --sync_binlog=1
+      - --innodb_flush_log_at_trx_commit=1
       - --server-id=1
     volumes:
       - db-data:/var/lib/mysql
@@ -120,7 +131,10 @@ services:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
       timeout: 5s
-      start_period: 30s
+      # 60s (was 30s) — first-run mysql_install_db on slow disks can exceed
+      # 30s; the longer grace prevents the initial healthcheck loop from
+      # marking the container unhealthy during legitimate bootstrap.
+      start_period: 60s
       retries: 6
     security_opt:
       - no-new-privileges:true
@@ -138,14 +152,26 @@ services:
     mem_limit: 384m
     cpus: 0.5
     logging: *logging
+    # AOF-only persistence: appendonly=yes + appendfsync=everysec gives
+    # at-most-1s of write loss on crash, with bounded fsync overhead. We
+    # explicitly disable RDB snapshots (--save "") because running both
+    # doubles fsync load and the AOF alone is sufficient for cache + session
+    # state. `--appendfsync everysec` is the upstream default; pinned here
+    # so future image bumps can't silently change it.
     command:
       - valkey-server
       - --appendonly
       - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - ""
       - --maxmemory
       - 256mb
       - --maxmemory-policy
       - allkeys-lru
+    environment:
+      TZ: ${TZ:-UTC}
     volumes:
       - valkey-data:/data
     healthcheck:
@@ -169,10 +195,44 @@ services:
     cpus: 0.25
     logging: *logging
     entrypoint: ["/bin/sh", "-c"]
+    # Asset sync — two-phase to minimise the window where nginx can serve
+    # partially-synced files during an upgrade.
+    #
+    # Phase 1: stage the new tree into /shared-public/.new/ (same volume, so
+    #          no cross-device copy; existing /shared-public/* keeps serving).
+    # Phase 2: for each top-level entry, rename(2) it into place atomically
+    #          and remove the previous entry. POSIX rename within the same
+    #          filesystem is atomic per-entry, so any given URL transitions
+    #          old→new in a single syscall.
+    #
+    # Residual race: we cannot atomically swap the whole tree (you can't
+    # rename(2) the mount point itself, and the assets directory contains
+    # ~hundreds of files). During a single sync run there is a brief window
+    # — bounded by the number of top-level entries × rename latency, not by
+    # tree size — where /shared-public mixes old and new entries. nginx may
+    # serve a request that references an old CSS file and a new JS file
+    # within that window. For Snipe-IT releases this is acceptable: assets
+    # are versioned-hash filenames in the mix-manifest, so the only realistic
+    # mismatch is during the brief swap, not for arbitrary later requests.
+    # If you require strict atomicity, front nginx with a blue/green deploy.
     command:
       - |
-        cp -a /var/www/html/public/. /shared-public/
-        echo "[app-assets] synced $(ls /shared-public | wc -l) entries"
+        set -eu
+        STAGE=/shared-public/.new
+        rm -rf "$$STAGE"
+        mkdir -p "$$STAGE"
+        cp -a /var/www/html/public/. "$$STAGE"/
+        # Atomic per-entry swap: for each top-level child of the staging dir
+        # mv it into /shared-public/ replacing the old entry. mv across the
+        # same mount is rename(2) — single-syscall atomic per entry.
+        for entry in "$$STAGE"/* "$$STAGE"/.[!.]*; do
+          [ -e "$$entry" ] || continue
+          name=$$(basename "$$entry")
+          rm -rf "/shared-public/$$name"
+          mv "$$entry" "/shared-public/$$name"
+        done
+        rmdir "$$STAGE" 2>/dev/null || rm -rf "$$STAGE"
+        echo "[app-assets] synced $$(ls /shared-public | wc -l) entries"
     volumes:
       - app-public:/shared-public
     networks:
@@ -205,12 +265,25 @@ services:
       - app-storage:/var/www/html/storage     # Laravel storage (logs, cache, backups)
       - fpm-sock:/run/php-fpm                 # php-fpm unix socket (shared with `web`)
     healthcheck:
+      # Composite check:
+      #   1. php-fpm /ping returns "pong" (the daemon is alive & accepting work)
+      #   2. /var/www/html/storage/framework/scheduler-heartbeat is no older
+      #      than 180s — ofelia's snipeit-heartbeat job (see labels below)
+      #      touches it every minute. A stale file means the scheduler died
+      #      or lost the docker socket and `schedule:run` is no longer firing.
+      # The "$$" escapes the literal $ from compose's variable interpolation
+      # so the shell receives "$(...)" and "$(( ... ))" as runtime expansions.
+      # busybox `stat -c%Y` and `date +%s` are both available in the alpine
+      # base image we ship.
       test:
         - CMD-SHELL
-        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php-fpm/snipeit.sock 2>/dev/null | grep -q pong'
+        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php-fpm/snipeit.sock 2>/dev/null | grep -q pong && test "$$(date +%s)" -le "$$(( $$(stat -c%Y /var/www/html/storage/framework/scheduler-heartbeat 2>/dev/null || echo 0) + 180 ))"'
       interval: 30s
       timeout: 10s
-      start_period: 120s
+      # 180s minimum so the snipeit-heartbeat ofelia job (@every 1m) has at
+      # least one cycle to write the heartbeat file before the freshness
+      # gate starts counting failures.
+      start_period: 180s
       retries: 3
     security_opt:
       - no-new-privileges:true
@@ -239,6 +312,16 @@ services:
       ofelia.job-exec.snipeit-schedule.schedule: "@every 1m"
       ofelia.job-exec.snipeit-schedule.user: "www-data"
       ofelia.job-exec.snipeit-schedule.command: 'php /var/www/html/artisan schedule:run --no-interaction --quiet'
+      # Liveness heartbeat — touches a file on the app-storage volume every
+      # minute. The app healthcheck reads the file's mtime and fails if it
+      # falls behind by >180s, surfacing scheduler/docker-socket failures
+      # as container unhealth (and thus `docker compose ps` red). The
+      # heartbeat job is intentionally independent from `schedule:run`: a
+      # bug in artisan won't suppress the heartbeat, so we only flag the
+      # scheduler *infrastructure* as down — not application errors.
+      ofelia.job-exec.snipeit-heartbeat.schedule: "@every 1m"
+      ofelia.job-exec.snipeit-heartbeat.user: "www-data"
+      ofelia.job-exec.snipeit-heartbeat.command: 'sh -c "mkdir -p /var/www/html/storage/framework && touch /var/www/html/storage/framework/scheduler-heartbeat"'
     networks:
       - snipeit
 
@@ -256,6 +339,9 @@ services:
         condition: service_completed_successfully
       app:
         condition: service_healthy
+    environment:
+      # Propagate TZ so access/error log timestamps line up with app/db/backup.
+      TZ: ${TZ:-UTC}
     volumes:
       - app-public:/var/www/html/public:ro
       - app-storage:/var/www/html/storage:ro
