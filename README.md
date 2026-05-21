@@ -74,14 +74,18 @@ This stack fixes all three:
 ```bash
 git clone https://github.com/netresearch/snipe-it-docker-compose-stack.git
 cd snipe-it-docker-compose-stack
-make init        # bootstraps .env: APP_KEY + random DB passwords (idempotent)
-make up          # docker compose up -d
-make logs-app    # follow app logs while it boots
+make init                              # bootstraps .env (APP_KEY + random DB passwords, idempotent)
+make up                                # docker compose up -d
+make logs-app                          # Ctrl-C stops the tail (does NOT stop the stack)
+# First boot pulls ~700 MB of images (~5 min on a typical link)
+# and runs `php artisan migrate --force` (~60-90 s) — wait for the
+# "ready — exec into CMD" line before opening the URL.
+# Then open:  http://localhost:8000
 ```
 
-Open `http://localhost:8000` and complete the setup wizard. `make help` lists every other target (`backup`, `upgrade`, `clean`, `artisan CMD="..."`, …).
+`make help` lists every target — backup, upgrade, clean, artisan, health, etc.
 
-For public deployments, edit `APP_URL` in `.env` after `make init` and re-run `make up`.
+For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make init` and run `make restart`. The reverse-proxy overlay at [`examples/compose.traefik.yml`](examples/compose.traefik.yml) handles TLS termination.
 
 ## Dev mode
 
@@ -185,6 +189,19 @@ make upgrade           # pulls latest images, recreates containers, follows logs
 
 The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL grant dance required — this stack's DB user is the app's own MariaDB account with full schema rights inside its database.
 
+## Operating the stack
+
+When something breaks, [`docs/runbook-day2-ops.md`](docs/runbook-day2-ops.md) catalogues the failure modes we know about — symptom → first check → recovery. Common ones:
+
+- App returns 500 — check `make logs-app` (Laravel logs to stdout as JSON since v0.2)
+- Users randomly logged out — Valkey LRU eviction; tune `--maxmemory` in `compose.yml` or switch to `SESSION_DRIVER=file`
+- `make up` complains about missing `.env` — run `make init` first; the Makefile guard prevents the empty-root-password footgun
+- Backup-volume full — `make backup-verify` flags it; tune retention in `config/phpbu/backup.json`
+
+For disaster recovery (lost DB / corrupted volume), [`docs/runbook-restore.md`](docs/runbook-restore.md) is the canonical procedure.
+
+`make health` shows the aggregated health state of all containers and fails loudly when one is unhealthy — wire it into your existing monitoring.
+
 ## Related projects
 
 - [grokability/snipe-it](https://github.com/grokability/snipe-it) — upstream Snipe-IT itself
@@ -194,7 +211,9 @@ The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL g
 
 ## Contributing
 
-PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Security issues: see [`SECURITY.md`](SECURITY.md).
+PRs welcome. Standard community files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY) inherit from [Netresearch's org-level `.github` repo](https://github.com/netresearch/.github).
+
+Security issues: please report via the standard Netresearch security contact rather than as a public issue.
 
 ## License
 
@@ -202,8 +221,8 @@ This repository uses split licensing — the right tool for each part:
 
 | Path | License | Rationale |
 |---|---|---|
-| `Dockerfile`, `rootfs/`, `config/`, `compose*.yml`, `examples/`, `.github/`, `.snipe-it-version` | [MIT](LICENSE-MIT) | Code and code-shaped configuration |
-| `README.md`, `CHANGELOG.md`, `docs/**` (when added), `CONTRIBUTING.md`, `SECURITY.md` (when added) | [CC-BY-SA-4.0](LICENSE-CC-BY-SA-4.0) | Prose and documentation — share-alike keeps forks open |
+| `Dockerfile`, `rootfs/`, `config/`, `compose*.yml`, `examples/`, `.github/`, `bin/`, `Makefile`, `tests/`, `renovate.json`, `.snipe-it-version` | [MIT](LICENSE-MIT) | Code and code-shaped configuration |
+| `README.md`, `CHANGELOG.md`, `docs/**` | [CC-BY-SA-4.0](LICENSE-CC-BY-SA-4.0) | Prose and documentation — share-alike keeps forks open |
 
 **The built image** (`ghcr.io/netresearch/snipe-it-php-fpm:*`) bundles AGPL-3.0 Snipe-IT application code from [grokability/snipe-it](https://github.com/grokability/snipe-it). Redistribution of the image is bound by the upstream AGPL-3.0 terms in addition to MIT for our build glue.
 

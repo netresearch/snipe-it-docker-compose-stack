@@ -1,7 +1,23 @@
 {
   "verbose": true,
   "logging": [
-    { "type": "json", "target": "/backups/phpbu.log" }
+    { "type": "json", "target": "/backups/phpbu.log" },
+    {
+      "type": "mail",
+      "options": {
+        "transport": "smtp",
+        "smtp.host":     "adapter:env:MAIL_HOST",
+        "smtp.port":     "adapter:env:MAIL_PORT",
+        "smtp.username": "adapter:env:MAIL_USERNAME",
+        "smtp.password": "adapter:env:MAIL_PASSWORD",
+        "smtp.encryption": "adapter:env:MAIL_ENCRYPTION",
+        "sender.mail":   "adapter:env:MAIL_FROM_ADDR",
+        "sender.name":   "adapter:env:MAIL_FROM_NAME",
+        "recipients":    "adapter:env:BACKUP_ALERT_TO",
+        "send.only.on.error": "true",
+        "subject": "[Snipe-IT] backup failure"
+      }
+    }
   ],
   "backups": [
     {

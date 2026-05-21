@@ -49,6 +49,32 @@ backup: ## Run a backup now (normally scheduled by ofelia at 03:00)
 backup-list: ## List backup archives
 	docker compose exec -T backup ls -lh /backups
 
+backup-verify: ## Sanity-check that last night's backup is on disk + non-zero
+	@docker compose exec -T backup sh -c '\
+		latest=$$(ls -t /backups/db/*.sql.gz 2>/dev/null | head -1); \
+		if [ -z "$$latest" ]; then \
+			echo "✗ no DB backups in /backups/db"; exit 1; \
+		fi; \
+		size=$$(stat -c%s "$$latest"); \
+		age_h=$$(( ($$(date +%s) - $$(stat -c%Y "$$latest")) / 3600 )); \
+		if [ "$$size" -lt 1024 ]; then \
+			echo "✗ $$latest is $$size bytes — likely empty"; exit 1; \
+		fi; \
+		if [ "$$age_h" -gt 26 ]; then \
+			echo "✗ newest dump is $${age_h}h old (should be < 26h)"; exit 1; \
+		fi; \
+		echo "✓ newest dump $$latest ($$size bytes, $${age_h}h old)"'
+
+health: ## Aggregated health state of all services + non-healthy summary
+	@docker compose ps --format '{{.Service}}\t{{.Status}}' | column -ts $$'\t'
+	@unhealthy=$$(docker compose ps --filter "health=unhealthy" -q | wc -l | tr -d ' '); \
+	if [ "$$unhealthy" != "0" ]; then \
+		printf '\n\033[1;31m%s unhealthy service(s)\033[0m — see docker compose logs <service>\n' "$$unhealthy"; \
+		exit 1; \
+	else \
+		printf '\n\033[1;32mAll services healthy.\033[0m\n'; \
+	fi
+
 # ────────────────────────────────────────────────────────────────────
 # Testing (local)
 # ────────────────────────────────────────────────────────────────────
@@ -86,4 +112,4 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 	  [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	docker compose down -v
 
-.PHONY: help init up down restart logs logs-app ps backup backup-list test-image test-snipeit pull upgrade shell artisan clean
+.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit pull upgrade shell artisan clean

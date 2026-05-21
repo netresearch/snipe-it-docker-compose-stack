@@ -285,6 +285,16 @@ services:
       DB_USERNAME: ${DB_USERNAME:-snipeit}
       DB_PASSWORD: ${DB_PASSWORD:-}
       TZ: ${TZ:-UTC}
+      # phpbu emits a failure email to BACKUP_ALERT_TO when set. Leave empty
+      # to disable. SMTP creds reused from the app's MAIL_* config.
+      BACKUP_ALERT_TO: ${BACKUP_ALERT_TO:-}
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_ENCRYPTION: ${MAIL_ENCRYPTION:-tls}
+      MAIL_FROM_ADDR: ${MAIL_FROM_ADDR:-noreply@example.com}
+      MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Snipe-IT Backup}
     volumes:
       - ./config/phpbu/backup.json:/config/backup.json:ro
       - app-storage:/snapshot/storage:ro
