@@ -22,12 +22,20 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Berlin"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
     labels:
       - "dependencies"
       - "github-actions"
+    # Minor + patch only. Major bumps are reviewed via Renovate (renovate.json
+    # has matchUpdateTypes: ['major'] separated out for human approval).
+    # Without this filter the first dependabot run produces a flood of major
+    # bumps (cosign-installer v3→v4, codeql-action v3→v4, attest-build v2→v4,
+    # etc.) — all of which need individual breaking-change review.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
       actions-minor-and-patch:
         update-types:
@@ -41,9 +49,13 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Berlin"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 3
     commit-message:
       prefix: "docker"
     labels:
       - "dependencies"
       - "docker"
+    # Same rationale — major bumps reviewed via Renovate.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
