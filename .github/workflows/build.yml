@@ -39,7 +39,11 @@ permissions:
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  # cancel-in-progress: false ONLY on schedule — interrupting the daily
+  # multi-arch rebuild mid-push could leave half-attached manifests.
+  # For push/pr/dispatch: cancel-in-progress=true so a new commit
+  # supersedes an older queued/running build instead of stacking up.
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   build:
