@@ -170,6 +170,7 @@ Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secr
 - **Pinned upstream** — Snipe-IT git-tag-pinned via `.snipe-it-version`, image SHAs pinned in Dockerfile
 - **Daily rebuild** — picks up base-image CVEs without waiting for upstream
 - **Supply chain** — SLSA build provenance + SBOM (cosign signing post-MVP)
+- **CVE scanning** — daily Trivy + osv-scanner runs (see [Actions → security](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/security.yml)). Findings are informational, NOT CI gates — most flagged CVEs are in Snipe-IT's upstream-pinned `composer.lock` (e.g. `phpseclib`, `onelogin/php-saml`) and need an upstream fix. Trivy SARIF uploads to GitHub code-scanning; subscribe via repo Security tab for new-finding alerts.
 
 ## Backups
 
