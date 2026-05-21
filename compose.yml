@@ -259,7 +259,9 @@ services:
     volumes:
       - app-public:/var/www/html/public:ro
       - app-storage:/var/www/html/storage:ro
-      - fpm-sock:/run/php-fpm:ro               # consume php-fpm socket
+      # NOT :ro — unix-socket connect() needs write to the socket file, and
+      # docker's :ro flag blocks that even when the socket mode allows it.
+      - fpm-sock:/run/php-fpm                  # consume php-fpm socket
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./config/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
       # security-headers.conf is `include`d by every location block in
@@ -355,21 +357,34 @@ services:
       - app-storage:/snapshot/storage:ro
       - app-data:/snapshot/data:ro
       - backups:/backups
-    # Idle entrypoint so ofelia can exec on demand; phpbu itself is a
-    # CLI tool (one-shot per invocation).
+    # The phpbu-docker image's default ENTRYPOINT runs `phpbu "$@"` and
+    # exits. We need the container to stay alive so ofelia can `docker
+    # exec` phpbu into it on a cron schedule. Replace entrypoint with an
+    # idle loop that also writes the TZ ini that the image's entrypoint
+    # would have created (so phpbu's timestamps land in the right zone).
     entrypoint: ["/bin/sh", "-c"]
-    command: ["mkdir -p /backups/db /backups/uploads /backups/storage && exec tail -f /dev/null"]
+    command:
+      - |
+        set -eu
+        mkdir -p /backups/db /backups/uploads /backups/storage
+        if [ -n "${TZ:-}" ]; then
+          printf 'date.timezone = %s\n' "$TZ" > /usr/local/etc/php/conf.d/tz.ini
+        fi
+        exec tail -f /dev/null
     healthcheck:
-      test: ["CMD", "sh", "-c", "test -d /backups && phpbu --version"]
+      # phpbu lives at /app/vendor/bin/phpbu (not on PATH). Test the
+      # binary is invokable as a healthcheck proxy.
+      test: ["CMD", "/app/vendor/bin/phpbu", "--version"]
       interval: 60s
       timeout: 10s
+      start_period: 15s
       retries: 3
     security_opt:
       - no-new-privileges:true
     labels:
       ofelia.enabled: "true"
       ofelia.job-exec.snipeit-backup.schedule: "0 0 3 * * *"
-      ofelia.job-exec.snipeit-backup.command: 'phpbu --configuration=/config/backup.json'
+      ofelia.job-exec.snipeit-backup.command: '/app/vendor/bin/phpbu --configuration=/config/backup.json'
     networks:
       - snipeit
 
