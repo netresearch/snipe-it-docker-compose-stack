@@ -18,7 +18,7 @@ jobs:
     name: hadolint (Dockerfile)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       # hadolint/hadolint-action@v3.1.0 bundles hadolint v2.12.0 (Mar 2023),
@@ -39,7 +39,7 @@ jobs:
     name: docker compose config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - name: Validate compose.yml
@@ -58,7 +58,7 @@ jobs:
     name: shellcheck (entrypoint + scripts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
@@ -69,7 +69,7 @@ jobs:
     name: yamllint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3
