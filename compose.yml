@@ -262,6 +262,9 @@ services:
       - fpm-sock:/run/php-fpm:ro               # consume php-fpm socket
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./config/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # security-headers.conf is `include`d by every location block in
+      # default.conf — must be mounted or nginx fails to start.
+      - ./config/nginx/snippets:/etc/nginx/snippets:ro
     ports:
       - "${SNIPEIT_HTTP_PORT:-8000}:80"
     healthcheck:
@@ -303,7 +306,9 @@ services:
         condition: service_started
       backup:
         condition: service_started
-    command: ["daemon", "--docker"]
+    # `--docker` flag was removed in newer ofelia — docker socket integration
+    # is the default. The mount below is what enables it.
+    command: ["daemon"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     security_opt:
