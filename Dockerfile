@@ -21,6 +21,9 @@ ARG ALPINE_VERSION=3.22
 # =====================================================================
 FROM php:${PHP_VERSION}-cli-alpine${ALPINE_VERSION} AS builder
 
+# pipefail — surface errors in piped curl downloads (hadolint DL4006)
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+
 ARG SNIPE_IT_VERSION=v8.5.0
 
 ENV COMPOSER_ALLOW_SUPERUSER=1 \
@@ -71,6 +74,9 @@ RUN set -eux; \
 # Stage 2: runtime — php-fpm only
 # =====================================================================
 FROM php:${PHP_VERSION}-fpm-alpine${ALPINE_VERSION} AS runtime
+
+# pipefail — surface errors in piped curl downloads (hadolint DL4006)
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
 ARG SNIPE_IT_VERSION=v8.5.0
 ARG PHP_VERSION=8.5

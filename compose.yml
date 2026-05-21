@@ -37,7 +37,8 @@ x-app-env: &app-env
   DB_DATABASE: ${DB_DATABASE:-snipeit}
   DB_USERNAME: ${DB_USERNAME:-snipeit}
   DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
-  REDIS_HOST: redis
+  # Valkey speaks the RESP protocol — Laravel's "redis" driver works as-is.
+  REDIS_HOST: valkey
   REDIS_PORT: 6379
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
   CACHE_DRIVER: ${CACHE_DRIVER:-redis}
@@ -86,13 +87,15 @@ services:
       - snipeit
 
   # ---------------------------------------------------------------------
-  # Redis — cache + sessions + queues
+  # Valkey — cache + sessions + queues
+  # Linux-Foundation Redis fork. Drop-in compatible; Laravel still uses
+  # the "redis" driver name (RESP protocol).
   # ---------------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
+  valkey:
+    image: valkey/valkey:9-alpine
     restart: unless-stopped
     command:
-      - redis-server
+      - valkey-server
       - --appendonly
       - "yes"
       - --maxmemory
@@ -100,9 +103,9 @@ services:
       - --maxmemory-policy
       - allkeys-lru
     volumes:
-      - redis-data:/data
+      - valkey-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -137,7 +140,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      valkey:
         condition: service_healthy
     environment:
       <<: *app-env
@@ -228,8 +231,8 @@ services:
 volumes:
   db-data:
     name: snipeit-db-data
-  redis-data:
-    name: snipeit-redis-data
+  valkey-data:
+    name: snipeit-valkey-data
   app-data:
     name: snipeit-app-data
   app-storage:

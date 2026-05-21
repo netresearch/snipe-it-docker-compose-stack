@@ -9,7 +9,7 @@ version tracks the upstream Snipe-IT release plus a date stamp.
 ### Added
 - Initial release: 6-service docker-compose stack with our own slim php-fpm image
   - **db** — mariadb:11 with binlog enabled
-  - **redis** — redis:7-alpine for cache/sessions/queues
+  - **valkey** — valkey/valkey:9-alpine for cache/sessions/queues (RESP-compatible Redis fork)
   - **app** — our PHP 8.5 / Alpine php-fpm image with Snipe-IT app code
   - **web** — nginx:alpine, fastcgi → app:9000, mounts our nginx config
   - **scheduler** — Netresearch's ofelia fork, label-driven `artisan schedule:run`

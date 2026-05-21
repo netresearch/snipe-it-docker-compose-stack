@@ -15,7 +15,7 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
         │
    client ──► db ──── mariadb:11 (binlog enabled)
         │
-        ├─── redis ─── redis:7-alpine
+        ├─── valkey ─── valkey/valkey:9-alpine
         │
         └─── app ───── ghcr.io/netresearch/snipe-it-php-fpm  ◄── built daily
                        │
@@ -30,7 +30,7 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
 | Service | Image | Purpose |
 |---|---|---|
 | **db** | `mariadb:11` | Primary store, binlog enabled for PITR |
-| **redis** | `redis:7-alpine` | Cache + sessions + queue backend |
+| **valkey** | `valkey/valkey:9-alpine` | Cache + sessions + queue backend (Redis-compatible) |
 | **app** | `ghcr.io/netresearch/snipe-it-php-fpm` | **Our** php-fpm image, Snipe-IT app code |
 | **web** | `nginx:alpine` | Static asset serving + fastcgi → `app:9000` |
 | **scheduler** | `ghcr.io/netresearch/ofelia` | `php artisan schedule:run` per minute via docker labels |
@@ -91,7 +91,7 @@ docker compose up -d
 Brings up the same stack plus:
 - **mailpit** at `http://localhost:8025` — SMTP sink + web UI to catch outgoing notifications
 - **adminer** at `http://localhost:8081` — DB browser
-- Exposed db (3306) + redis (6379) host ports for external clients
+- Exposed db (3306) + valkey (6379) host ports for external clients
 - `APP_DEBUG=true`, `APP_ENV=local`
 
 ## TLS / reverse proxy
@@ -134,7 +134,7 @@ Operational toggles:
 | Variable | Default | Description |
 |---|---|---|
 | `SNIPE_IT_IMAGE_TAG` | `latest` | Pin to a specific image build |
-| `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_DRIVER` | `redis` | Flip to `file`/`file`/`sync` if you remove the redis service |
+| `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_DRIVER` | `redis` | Laravel driver name (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
 | `SKIP_MIGRATIONS` | `false` | Skip `php artisan migrate --force` at container start |
 | `TZ` | `UTC` | IANA timezone |
 
