@@ -5,13 +5,14 @@
 #
 # Services:
 #   db          — mariadb:11, binlog enabled (PITR-ready)
-#   redis       — redis:7-alpine, cache + sessions + queues
+#   valkey      — valkey:9-alpine, cache + sessions + queues (RESP-compatible)
 #   app-assets  — one-shot init: syncs Snipe-IT's public/ assets into a
 #                 shared volume so nginx can serve them
 #   app         — our php-fpm image (Snipe-IT code, no nginx)
 #   web         — nginx:alpine, serves static + fastcgi -> app:9000
-#   scheduler   — ofelia (netresearch's fork), runs artisan schedule:run/min
-#                 via docker labels on `app`
+#   scheduler   — ofelia (Netresearch's fork), label-driven cron for both
+#                 `artisan schedule:run` (per minute) and `phpbu` (nightly)
+#   backup      — phpbu-docker, nightly DB dump + uploads/storage archives
 #
 # Quickstart:
 #   1. cp .env.example .env  &&  edit .env
@@ -29,8 +30,11 @@ name: snipe-it
 # Shared environment between app + scheduler-driven exec (both need full env
 # to be able to talk to db / redis / mail).
 x-app-env: &app-env
-  APP_KEY: ${APP_KEY:?run "docker run --rm ghcr.io/netresearch/snipe-it-php-fpm:latest php /var/www/html/artisan key:generate --show", then put the result in .env}
-  APP_URL: ${APP_URL:?set APP_URL in .env (no trailing slash)}
+  # APP_KEY / DB_PASSWORD / DB_ROOT_PASSWORD are populated by `make init` —
+  # the app entrypoint refuses to start with empty values, so we don't
+  # repeat the validation here.
+  APP_KEY: ${APP_KEY:-}
+  APP_URL: ${APP_URL:-http://localhost:8000}
   APP_ENV: ${APP_ENV:-production}
   APP_DEBUG: ${APP_DEBUG:-false}
   TZ: ${TZ:-UTC}
@@ -39,7 +43,7 @@ x-app-env: &app-env
   DB_PORT: 3306
   DB_DATABASE: ${DB_DATABASE:-snipeit}
   DB_USERNAME: ${DB_USERNAME:-snipeit}
-  DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+  DB_PASSWORD: ${DB_PASSWORD:-}
   # Valkey speaks the RESP protocol — Laravel's "redis" driver works as-is.
   REDIS_HOST: valkey
   REDIS_PORT: 6379
@@ -63,10 +67,12 @@ services:
     image: mariadb:11
     restart: unless-stopped
     environment:
-      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD must be set}
+      # Populated by `make init`; mariadb refuses to start with empty root
+      # password — the failure is loud and the runbook clear.
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-}
       MARIADB_DATABASE: ${DB_DATABASE:-snipeit}
       MARIADB_USER: ${DB_USERNAME:-snipeit}
-      MARIADB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-}
       MARIADB_AUTO_UPGRADE: "1"
       TZ: ${TZ:-UTC}
     command:
@@ -214,8 +220,8 @@ services:
 
   # ---------------------------------------------------------------------
   # Scheduler — ofelia (Netresearch's fork) drives Laravel's schedule
-  # via labels on the app service. Mounts the host docker socket
-  # read-only so it can `docker exec` into the app container.
+  # AND the nightly phpbu backup, via labels on the target services.
+  # Mounts the host docker socket read-only so it can `docker exec`.
   # ---------------------------------------------------------------------
   scheduler:
     image: ghcr.io/netresearch/ofelia:latest
@@ -223,11 +229,57 @@ services:
     depends_on:
       app:
         condition: service_started
+      backup:
+        condition: service_started
     command: ["daemon", "--docker"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     security_opt:
       - no-new-privileges:true
+    networks:
+      - snipeit
+
+  # ---------------------------------------------------------------------
+  # Backup — phpbu (Netresearch's hardened image) dumps the DB and
+  # archives uploads + storage volumes nightly. Container idles between
+  # runs; ofelia execs phpbu via the labels below.
+  #
+  # Configure off-host destination by bind-mounting `./backups` to a
+  # mounted share (NAS, NFS) — or remove the bind-mount and rely on
+  # restic/rclone running on the host side reading from the named volume.
+  # ---------------------------------------------------------------------
+  backup:
+    image: ghcr.io/netresearch/phpbu-docker:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_DATABASE: ${DB_DATABASE:-snipeit}
+      DB_USERNAME: ${DB_USERNAME:-snipeit}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./config/phpbu/backup.json:/config/backup.json:ro
+      - app-storage:/snapshot/storage:ro
+      - app-data:/snapshot/data:ro
+      - backups:/backups
+    # Idle entrypoint so ofelia can exec on demand; phpbu itself is a
+    # CLI tool (one-shot per invocation).
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /backups/db /backups/uploads /backups/storage && exec tail -f /dev/null"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -d /backups && phpbu --version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      ofelia.enabled: "true"
+      ofelia.job-exec.snipeit-backup.schedule: "0 0 3 * * *"
+      ofelia.job-exec.snipeit-backup.command: 'phpbu --configuration=/config/backup.json'
     networks:
       - snipeit
 
@@ -242,6 +294,8 @@ volumes:
     name: snipeit-app-storage
   app-public:
     name: snipeit-app-public
+  backups:
+    name: snipeit-backups
 
 networks:
   snipeit:

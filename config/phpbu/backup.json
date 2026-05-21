@@ -1,0 +1,67 @@
+{
+  "verbose": true,
+  "logging": [
+    { "type": "json", "target": "/backups/phpbu.log" }
+  ],
+  "backups": [
+    {
+      "name": "snipeit-db",
+      "source": {
+        "type": "mysqldump",
+        "options": {
+          "host": "adapter:env:DB_HOST",
+          "databases": "adapter:env:DB_DATABASE",
+          "user": "adapter:env:DB_USERNAME",
+          "password": "adapter:env:DB_PASSWORD",
+          "singleTransaction": "true",
+          "quick": "true"
+        }
+      },
+      "target": {
+        "dirname": "/backups/db",
+        "filename": "snipeit-db-%Y%m%d-%H%i%s.sql",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "capacity",
+        "options": { "size": "5G" }
+      }
+    },
+    {
+      "name": "snipeit-uploads",
+      "source": {
+        "type": "tar",
+        "options": {
+          "path": "/snapshot/data"
+        }
+      },
+      "target": {
+        "dirname": "/backups/uploads",
+        "filename": "snipeit-uploads-%Y%m%d-%H%i%s.tar",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "outdated",
+        "options": { "older": "30D" }
+      }
+    },
+    {
+      "name": "snipeit-storage",
+      "source": {
+        "type": "tar",
+        "options": {
+          "path": "/snapshot/storage"
+        }
+      },
+      "target": {
+        "dirname": "/backups/storage",
+        "filename": "snipeit-storage-%Y%m%d-%H%i%s.tar",
+        "compress": "gzip"
+      },
+      "cleanup": {
+        "type": "outdated",
+        "options": { "older": "30D" }
+      }
+    }
+  ]
+}

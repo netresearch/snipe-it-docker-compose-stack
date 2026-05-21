@@ -16,12 +16,20 @@ version tracks the upstream Snipe-IT release plus a date stamp.
   redistributors are bound by those upstream terms.
 
 ### Added
-- Initial release: 6-service docker-compose stack with our own slim php-fpm image
+- `make init` bootstrap: generates `APP_KEY` and random DB passwords into
+  `.env`; idempotent re-runs preserve existing values
+- `Makefile` with the common lifecycle targets (init/up/down/logs/backup/
+  upgrade/artisan/clean)
+- `backup` service using `ghcr.io/netresearch/phpbu-docker` — nightly at
+  03:00 (ofelia label), DB dump + uploads + storage with 30-day / 5-GB
+  retention
+- Initial release: 7-service docker-compose stack with our own slim php-fpm image
   - **db** — mariadb:11 with binlog enabled
   - **valkey** — valkey/valkey:9-alpine for cache/sessions/queues (RESP-compatible Redis fork)
   - **app** — our PHP 8.5 / Alpine php-fpm image with Snipe-IT app code
   - **web** — nginx:alpine, fastcgi → app:9000, mounts our nginx config
-  - **scheduler** — Netresearch's ofelia fork, label-driven `artisan schedule:run`
+  - **scheduler** — Netresearch's ofelia fork, label-driven cron for both `artisan schedule:run` and `phpbu`
+  - **backup** — phpbu-docker; nightly archives
   - **app-assets** — one-shot init to share Snipe-IT's `public/` with nginx
 - Dev override (mailpit + adminer + exposed db/redis ports + APP_DEBUG=true)
 - Traefik example overlay

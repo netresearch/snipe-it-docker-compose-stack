@@ -8,7 +8,7 @@
 [![License: MIT (code)](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE-MIT)
 [![License: CC-BY-SA-4.0 (content)](https://img.shields.io/badge/content-CC--BY--SA--4.0-green.svg)](LICENSE-CC-BY-SA-4.0)
 
-Opinionated, hardened, **daily-built** [Snipe-IT](https://snipeitapp.com/) deployment — a 6-service docker-compose stack with our own slim **PHP 8.5 / Alpine** php-fpm image, plus dev overrides with mailpit and adminer for friction-free local development.
+Opinionated, hardened, **daily-built** [Snipe-IT](https://snipeitapp.com/) deployment — a 7-service docker-compose stack with our own slim **PHP 8.5 / Alpine** php-fpm image, scheduled `phpbu` backups out of the box, plus dev overrides with mailpit and adminer for friction-free local development.
 
 Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a real Snipe-IT inventory evaluation. Battle-scarred defaults, not a barebones starter.
 
@@ -21,11 +21,13 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
         │
         ├─── valkey ─── valkey/valkey:9-alpine
         │
-        └─── app ───── ghcr.io/netresearch/snipe-it-php-fpm  ◄── built daily
-                       │
-                       └─◄ scheduler ── ghcr.io/netresearch/ofelia
-                              (runs `php artisan schedule:run` per minute
-                               via docker exec, label-driven)
+        ├─── app ───── ghcr.io/netresearch/snipe-it-php-fpm   ◄── built daily
+        │              │
+        │              ├─◄ scheduler ── ghcr.io/netresearch/ofelia
+        │              │      (runs `php artisan schedule:run` per minute)
+        │              │
+        └─── backup ── ghcr.io/netresearch/phpbu-docker
+                       └─◄ (same ofelia drives nightly `phpbu` runs)
 
    one-shot init: `app-assets` populates a shared volume with Snipe-IT's
    public/ files so nginx can serve them statically.
@@ -37,7 +39,8 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
 | **valkey** | `valkey/valkey:9-alpine` | Cache + sessions + queue backend (Redis-compatible) |
 | **app** | `ghcr.io/netresearch/snipe-it-php-fpm` | **Our** php-fpm image, Snipe-IT app code |
 | **web** | `nginx:alpine` | Static asset serving + fastcgi → `app:9000` |
-| **scheduler** | `ghcr.io/netresearch/ofelia` | `php artisan schedule:run` per minute via docker labels |
+| **scheduler** | `ghcr.io/netresearch/ofelia` | Label-driven cron for `artisan schedule:run` (per minute) **and** the nightly `phpbu` backup |
+| **backup** | `ghcr.io/netresearch/phpbu-docker` | Nightly DB dump + uploads/storage tarball with retention policy |
 | **app-assets** | (same as `app`) | One-shot init: syncs `public/` into the shared volume |
 
 ## What's in our image
@@ -71,19 +74,14 @@ This stack fixes all three:
 ```bash
 git clone https://github.com/netresearch/snipe-it-docker-compose-stack.git
 cd snipe-it-docker-compose-stack
-cp .env.example .env
-
-# Generate an APP_KEY (one-shot)
-docker run --rm ghcr.io/netresearch/snipe-it-php-fpm:latest \
-  php /var/www/html/artisan key:generate --show
-# Paste the output into .env as APP_KEY=base64:...
-
-# Set DB_PASSWORD, DB_ROOT_PASSWORD, APP_URL in .env, then:
-docker compose up -d
-docker compose logs -f app
+make init        # bootstraps .env: APP_KEY + random DB passwords (idempotent)
+make up          # docker compose up -d
+make logs-app    # follow app logs while it boots
 ```
 
-Open `http://localhost:8000` and complete the setup wizard.
+Open `http://localhost:8000` and complete the setup wizard. `make help` lists every other target (`backup`, `upgrade`, `clean`, `artisan CMD="..."`, …).
+
+For public deployments, edit `APP_URL` in `.env` after `make init` and re-run `make up`.
 
 ## Dev mode
 
@@ -155,18 +153,22 @@ Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secr
 - **Daily rebuild** — picks up base-image CVEs without waiting for upstream
 - **Supply chain** — SLSA build provenance + SBOM (cosign signing post-MVP)
 
+## Backups
+
+`phpbu` runs nightly at **03:00** (ofelia-driven) and produces three artefact families in the `backups` volume:
+
+| Path | Contents | Retention |
+|---|---|---|
+| `db/snipeit-db-*.sql.gz` | mariadb-dump (single-transaction, with routines) | rolling capacity (~5 GB) |
+| `uploads/snipeit-uploads-*.tar.gz` | Snipe-IT uploads (`app-data` volume) | 30 days |
+| `storage/snipeit-storage-*.tar.gz` | Laravel storage (`app-storage` volume) | 30 days |
+
+On-demand backup: `make backup`. Off-host shipping: bind-mount the `backups` volume into a destination synced by your existing tool (restic, rclone, NAS-attached cron).
+
 ## Upgrading
 
 ```bash
-# 1. Backup (the binlog enables PITR but a logical dump is the operational baseline)
-docker compose exec db sh -c \
-  'mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --single-transaction --routines --triggers snipeit' \
-  | gzip > "backup-$(date +%Y%m%d-%H%M%S).sql.gz"
-
-# 2. Pull + restart
-docker compose pull
-docker compose up -d
-docker compose logs -f app
+make upgrade           # pulls latest images, recreates containers, follows logs
 ```
 
 The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL grant dance required — this stack's DB user is the app's own MariaDB account with full schema rights inside its database.
@@ -176,7 +178,7 @@ The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL g
 - [grokability/snipe-it](https://github.com/grokability/snipe-it) — upstream Snipe-IT itself
 - [snipe/snipe-it](https://hub.docker.com/r/snipe/snipe-it) — official Docker image
 - [netresearch/ofelia](https://github.com/netresearch/ofelia) — the scheduler this stack uses
-- [netresearch/phpbu-docker](https://github.com/netresearch/phpbu-docker) — Netresearch's hardened phpbu image (sibling project)
+- [netresearch/phpbu-docker](https://github.com/netresearch/phpbu-docker) — the backup engine this stack uses
 
 ## Contributing
 
