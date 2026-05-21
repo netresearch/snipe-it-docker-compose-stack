@@ -84,7 +84,50 @@ RUN set -eux; \
     && chmod -R 0775 storage bootstrap/cache
 
 # =====================================================================
-# Stage 2: runtime — php-fpm only
+# Stage 2: tester — installs dev deps + runs Snipe-IT's own test suite
+#
+# This stage is NOT in the production image. It's built on demand for CI
+# (or via `make test-image`) to catch regressions in rolling builds OR
+# base-image-bump-induced PHP-extension fallout that pinned builds would
+# otherwise ship silently.
+# =====================================================================
+FROM builder AS tester
+
+ARG SKIP_TESTS=false
+
+# Install dev deps now (builder did --no-dev). Failure means the dev
+# composer constraints don't resolve against PHP 8.5 — surface loudly.
+RUN --mount=type=cache,target=/root/.composer/cache \
+    set -eux; \
+    composer install --no-progress --no-scripts --prefer-dist
+
+# Minimal test env — sqlite in-memory DB, dummy APP_KEY, no external deps
+RUN set -eux; \
+    cp -f .env.example .env 2>/dev/null || true; \
+    echo "APP_KEY=base64:Q0lfUExBQ0VIT0xERVJfS0VZX0ZPUl9DSV9PTkxZX1VTRQ==" >> .env; \
+    echo "APP_ENV=testing"   >> .env; \
+    echo "DB_CONNECTION=sqlite" >> .env; \
+    echo "DB_DATABASE=:memory:" >> .env; \
+    echo "CACHE_DRIVER=array" >> .env; \
+    echo "SESSION_DRIVER=array" >> .env; \
+    echo "QUEUE_DRIVER=sync" >> .env; \
+    echo "MAIL_MAILER=log" >> .env
+
+# Run upstream tests. Snipe-IT uses phpunit + the `php artisan test`
+# wrapper. Failure exits the build — perfect gate for CI.
+RUN set -eux; \
+    if [ "${SKIP_TESTS}" = "true" ]; then \
+        echo "[tester] SKIP_TESTS=true — skipping suite"; \
+        exit 0; \
+    fi; \
+    php artisan key:generate --force >/dev/null 2>&1 || true; \
+    php artisan test --without-tty --stop-on-failure || { \
+        echo "[tester] upstream test suite failed — see output above"; \
+        exit 1; \
+    }
+
+# =====================================================================
+# Stage 3: runtime — php-fpm only
 # =====================================================================
 FROM php:${PHP_VERSION}-fpm-alpine${ALPINE_VERSION} AS runtime
 

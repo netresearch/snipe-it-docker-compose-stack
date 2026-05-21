@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+
+name: smoke-test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      run_upstream_tests:
+        description: 'Also run Snipe-IT phpunit suite (slow, ~5-10 min)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-surface:
+    name: container-structure-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build amd64 image (load locally)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          load: true
+          tags: snipe-it-php-fpm:test
+          cache-from: type=gha,scope=smoke-test
+          cache-to: type=gha,scope=smoke-test,mode=max
+      - name: Install container-structure-test
+        run: |
+          curl -fsSL -o /tmp/cst \
+            "https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64"
+          sudo install /tmp/cst /usr/local/bin/container-structure-test
+      - name: Run image-surface tests
+        run: container-structure-test test --image snipe-it-php-fpm:test --config tests/container-structure-test.yaml
+
+  compose-up:
+    name: stack boots healthy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - name: Bootstrap .env
+        run: |
+          cp .env.example .env
+          sed -i \
+            -e 's|^APP_KEY=$|APP_KEY=base64:Q0lfUExBQ0VIT0xERVJfS0VZX0ZPUl9DSV9PTkxZX1VTRQ==|' \
+            -e 's|^DB_PASSWORD=$|DB_PASSWORD=ci-pw-not-secret|' \
+            -e 's|^DB_ROOT_PASSWORD=$|DB_ROOT_PASSWORD=ci-rootpw-not-secret|' \
+            .env
+          chmod 0600 .env
+      - name: Wait for build workflow to push :latest first
+        # Use the freshly-built image if available; falls back to previous
+        # latest if the build workflow hasn't finished. For PRs, this just
+        # uses whatever :latest exists, which is fine for compose-up smoke.
+        run: |
+          docker compose pull --quiet || true
+      - name: docker compose up -d
+        run: docker compose up -d --wait --wait-timeout 300
+      - name: Wait for HTTP 200/302 on /
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ || true)
+            case "$code" in
+              200|302)
+                echo "got HTTP $code — pass"
+                exit 0
+                ;;
+            esac
+            echo "[$i] HTTP $code — retrying in 5 s"
+            sleep 5
+          done
+          echo "stack didn't return 200/302 in 150 s"
+          docker compose logs --tail=200
+          exit 1
+      - name: Tear down (cleanup)
+        if: always()
+        run: docker compose down -v
+
+  init-idempotency:
+    name: init.sh is idempotent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - name: First run
+        run: ./bin/init.sh
+      - name: Snapshot .env
+        run: cp .env .env.firstrun
+      - name: Second run (must not change APP_KEY or passwords)
+        run: |
+          ./bin/init.sh
+          if ! diff -u .env.firstrun .env; then
+            echo "init.sh is NOT idempotent — APP_KEY or random PWs were re-rolled"
+            exit 1
+          fi
+
+  upstream-tests:
+    name: Snipe-IT phpunit suite
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      inputs.run_upstream_tests
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build + run tester stage (executes upstream phpunit)
+        # The tester stage exits non-zero if any Snipe-IT test fails — so
+        # the build itself IS the test. No load needed.
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: tester
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=tester
+          cache-to: type=gha,scope=tester,mode=max

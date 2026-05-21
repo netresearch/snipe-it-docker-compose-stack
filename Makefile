@@ -50,6 +50,19 @@ backup-list: ## List backup archives
 	docker compose exec -T backup ls -lh /backups
 
 # ────────────────────────────────────────────────────────────────────
+# Testing (local)
+# ────────────────────────────────────────────────────────────────────
+
+test-image: ## Build runtime image + run container-structure-test (image-surface check)
+	docker buildx build --target runtime --platform linux/amd64 --load -t snipe-it-php-fpm:test .
+	@command -v container-structure-test >/dev/null 2>&1 \
+	  || { echo "Install: https://github.com/GoogleContainerTools/container-structure-test/releases"; exit 1; }
+	container-structure-test test --image snipe-it-php-fpm:test --config tests/container-structure-test.yaml
+
+test-snipeit: ## Build tester stage — runs Snipe-IT's own phpunit suite, fails the build on any failure
+	docker buildx build --target tester --platform linux/amd64 .
+
+# ────────────────────────────────────────────────────────────────────
 # Upgrade
 # ────────────────────────────────────────────────────────────────────
 
@@ -73,4 +86,4 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 	  [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	docker compose down -v
 
-.PHONY: help init up down restart logs logs-app ps backup backup-list pull upgrade shell artisan clean
+.PHONY: help init up down restart logs logs-app ps backup backup-list test-image test-snipeit pull upgrade shell artisan clean
