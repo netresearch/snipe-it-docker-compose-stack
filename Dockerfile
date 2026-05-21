@@ -161,8 +161,14 @@ RUN set -eux; \
         icu-dev libpng-dev libjpeg-turbo-dev freetype-dev \
         libxml2-dev libzip-dev oniguruma-dev openldap-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    # NOTE: opcache is NOT in this list. PHP 8.5 statically builds opcache into
+    # the binary (the configure command lacks --with-opcache as a build option;
+    # opcache appears as a Zend Module in `php -m` out of the box). Running
+    # `docker-php-ext-install opcache` against PHP 8.5 fails with
+    # `cp: can't stat 'modules/*'` because there's no shared module to install.
+    # Our snipe-it.ini's opcache.* settings still apply unchanged.
     && docker-php-ext-install -j"$(nproc)" \
-        bcmath gd intl ldap mbstring opcache pdo_mysql xml zip \
+        bcmath gd intl ldap mbstring pdo_mysql xml zip \
     && pecl install redis \
     && docker-php-ext-enable redis \
     && apk del .ext-build-deps \
