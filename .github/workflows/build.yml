@@ -49,6 +49,13 @@ jobs:
   build:
     name: build (${{ matrix.track.name }}/${{ matrix.composer }})
     runs-on: ubuntu-latest
+    # Rolling variants resolve composer deps fresh against composer.json
+    # ranges, so they fail whenever upstream Snipe-IT's constraints
+    # reference a major that's now under a composer audit advisory
+    # (e.g. symfony/dom-crawler ^4.4 → PKSA-5r1g-c7b7-y1zg). This is the
+    # rolling variant working as designed; don't let it block the pinned
+    # variants which ARE the canonical release artefacts.
+    continue-on-error: ${{ matrix.composer == 'rolling' }}
     permissions:
       contents: read
       packages: write

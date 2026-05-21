@@ -132,6 +132,8 @@ variants. Pick a variant by tag suffix:
 - **`pinned` (default)** — honours Snipe-IT's shipped `composer.lock`. Reproducible: rebuilding `8.5.0` at any date produces a manifest-equivalent image (modulo Alpine + PHP base-image patches). Recommended for production.
 - **`-rolling`** — `composer.lock` is deleted before `composer install`, so Composer resolves fresh against `composer.json` ranges. Daily rebuild picks up transitive Composer-package CVE fixes without waiting for upstream Snipe-IT to cut a patch release. Use if you'd rather catch CVEs early than match upstream's tested dependency graph.
 
+**Rolling-variant caveat:** rolling builds can fail (and thus skip publishing a fresh tag) when upstream Snipe-IT's `composer.json` references a major version of a dependency that is *entirely* covered by a Composer audit advisory — e.g. `symfony/dom-crawler ^4.4` when every v4.4.x is under PKSA-5r1g-c7b7-y1zg. Composer refuses to install vulnerable packages by default. When this happens, the **pinned** image still ships because its lockfile points at the specific safe version upstream chose; the rolling tag lags until Snipe-IT bumps its constraint. Watch the failed rolling-build job in CI to see which advisory tripped it.
+
 Each image (both variants) ships a manifest at `/var/lib/snipeit/deps.txt` —
 `docker exec <container> cat /var/lib/snipeit/deps.txt` to see exactly which
 versions are installed.
