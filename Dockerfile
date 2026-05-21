@@ -27,6 +27,12 @@ FROM php:${PHP_VERSION}-cli-alpine${ALPINE_VERSION} AS builder
 SHELL ["/bin/ash", "-o", "pipefail", "-c"]
 
 ARG SNIPE_IT_VERSION=v8.5.0
+# ROLLING_DEPS=true deletes Snipe-IT's composer.lock before `composer install`,
+# letting Composer resolve fresh against the `^` ranges in composer.json. Used
+# by the `-rolling` image variants so daily rebuilds pick up transitive CVE
+# fixes without waiting for upstream to cut a release.
+# Default: false — produces deterministic, audit-friendly pinned images.
+ARG ROLLING_DEPS=false
 
 ENV COMPOSER_ALLOW_SUPERUSER=1 \
     COMPOSER_NO_INTERACTION=1 \
@@ -55,13 +61,18 @@ RUN set -eux; \
 
 RUN --mount=type=cache,target=/root/.composer/cache \
     set -eux; \
+    if [ "${ROLLING_DEPS}" = "true" ]; then \
+        echo "[rolling-variant] deleting composer.lock to resolve fresh deps"; \
+        rm -f composer.lock; \
+    fi; \
     composer install \
         --no-dev \
         --no-progress \
         --no-scripts \
         --prefer-dist \
         --optimize-autoloader \
-    && composer dump-autoload --optimize --no-dev
+    && composer dump-autoload --optimize --no-dev \
+    && composer show --format=text > /build/deps-manifest.txt
 
 RUN set -eux; \
     mkdir -p \
@@ -84,6 +95,7 @@ ARG SNIPE_IT_VERSION=v8.5.0
 ARG PHP_VERSION=8.5
 ARG BUILD_DATE
 ARG VCS_REF
+ARG ROLLING_DEPS=false
 
 LABEL org.opencontainers.image.title="snipe-it-php-fpm" \
       org.opencontainers.image.description="Snipe-IT ${SNIPE_IT_VERSION} on PHP ${PHP_VERSION} / Alpine — php-fpm only (use with snipe-it-docker-compose-stack)" \
@@ -117,6 +129,13 @@ RUN set -eux; \
 WORKDIR /var/www/html
 COPY --from=builder --chown=www-data:www-data /build /var/www/html
 COPY rootfs/ /
+
+# Surface the dependency manifest for ops debugging:
+#   docker exec snipe-it cat /var/lib/snipeit/deps.txt
+RUN mkdir -p /var/lib/snipeit \
+    && cp /var/www/html/deps-manifest.txt /var/lib/snipeit/deps.txt \
+    && chmod 0644 /var/lib/snipeit/deps.txt \
+    && rm -f /var/www/html/deps-manifest.txt
 
 RUN set -eux; \
     mkdir -p /var/lib/snipeit \

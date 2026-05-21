@@ -109,16 +109,28 @@ See [`examples/`](examples/) for the complete Traefik recipe; alternatives (Cadd
 
 ## Image tags
 
-| Tag | Description |
-|---|---|
-| `latest` | Latest stable Snipe-IT release, freshly built |
-| `vX.Y.Z` | Pinned Snipe-IT release (e.g. `v8.5.0`) |
-| `vX.Y.Z-YYYYMMDD` | Reproducible date-stamped variant for audit trails |
-| `vX.Y` | Latest patch of a minor (e.g. `v8.5`) |
-| `vX` | Latest minor of a major (e.g. `v8`) |
-| `sha-<commit>` | Per-commit build of this repo |
+Built daily, multi-arch (`linux/amd64` + `linux/arm64`), two dependency
+variants. Pick a variant by tag suffix:
 
-Both `linux/amd64` and `linux/arm64`.
+| Pinned (default) | Rolling (suffix `-rolling`) | Source ref | What it gives you |
+|---|---|---|---|
+| `latest` | `rolling` | latest stable release | Default; tracks `.snipe-it-version` |
+| `8.5.0` | `8.5.0-rolling` | `refs/tags/v8.5.0` | Pin a specific Snipe-IT release |
+| `8.5.0-YYYYMMDD` | `8.5.0-rolling-YYYYMMDD` | same | Reproducible dated build (audit-friendly) |
+| `8.5` | `8.5-rolling` | latest patch of 8.5.x | Auto-rolls on `.x` bump |
+| `8` | `8-rolling` | latest minor of 8.x | Auto-rolls on minor bump |
+| `master` | `master-rolling` | `refs/heads/master` | Upstream stable branch HEAD |
+| `develop` / `nightly` | `develop-rolling` / `nightly-rolling` | `refs/heads/develop` | Pre-release / bleeding edge |
+| `sha-pinned-<sha>` | `sha-rolling-<sha>` | this repo's commit | Per-stack-commit build |
+
+### Pinned vs Rolling — which should you use?
+
+- **`pinned` (default)** — honours Snipe-IT's shipped `composer.lock`. Reproducible: rebuilding `8.5.0` at any date produces a manifest-equivalent image (modulo Alpine + PHP base-image patches). Recommended for production.
+- **`-rolling`** — `composer.lock` is deleted before `composer install`, so Composer resolves fresh against `composer.json` ranges. Daily rebuild picks up transitive Composer-package CVE fixes without waiting for upstream Snipe-IT to cut a patch release. Use if you'd rather catch CVEs early than match upstream's tested dependency graph.
+
+Each image (both variants) ships a manifest at `/var/lib/snipeit/deps.txt` —
+`docker exec <container> cat /var/lib/snipeit/deps.txt` to see exactly which
+versions are installed.
 
 ## Configuration
 

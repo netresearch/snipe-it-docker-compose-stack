@@ -43,7 +43,7 @@ concurrency:
 
 jobs:
   build:
-    name: build (${{ matrix.track.name }})
+    name: build (${{ matrix.track.name }}/${{ matrix.composer }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -67,6 +67,11 @@ jobs:
           - name: develop
             ref_source: develop
             tags_extra: 'develop,nightly'
+        composer:
+          # `pinned`  — Snipe-IT's shipped composer.lock honored (reproducible)
+          # `rolling` — composer.lock deleted before install (catches transitive CVEs)
+          - pinned
+          - rolling
     steps:
       - name: Filter — should this track run?
         id: gate
@@ -151,33 +156,43 @@ jobs:
         id: tags_tag
         env:
           IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
+          COMPOSER_MODE: ${{ matrix.composer }}
         run: |
-          # Strip-v scheme matching phpbu pattern: 8.5.0 / 8.5 / 8 / latest
+          # Suffix derived from composer mode:
+          #   pinned  -> '' (bare tags — 8.5.0, 8.5, 8, latest)
+          #   rolling -> '-rolling' (8.5.0-rolling, 8.5-rolling, 8-rolling, rolling)
+          SUF=""
+          LATEST="latest"
+          [ "$COMPOSER_MODE" = "rolling" ] && { SUF="-rolling"; LATEST="rolling"; }
           {
             echo "tags<<__EOF__"
-            echo "type=raw,value=${{ steps.ref.outputs.version }}"
-            echo "type=raw,value=${{ steps.ref.outputs.version }}-${{ steps.ref.outputs.date_tag }}"
-            echo "type=raw,value=${{ steps.ref.outputs.major_minor }}"
-            echo "type=raw,value=${{ steps.ref.outputs.major }}"
-            # `latest` only when this build is from the .snipe-it-version file,
-            # NOT from a workflow_dispatch override on an older version
-            echo "type=raw,value=latest,enable=${{ env.IS_RELEASE_FROM_FILE == 'true' && github.ref == 'refs/heads/main' }}"
-            echo "type=sha,prefix=sha-"
+            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}"
+            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}-${{ steps.ref.outputs.date_tag }}"
+            echo "type=raw,value=${{ steps.ref.outputs.major_minor }}${SUF}"
+            echo "type=raw,value=${{ steps.ref.outputs.major }}${SUF}"
+            # `latest` (pinned) / `rolling` (rolling-latest) only when the build
+            # is from the .snipe-it-version file AND ref is main
+            echo "type=raw,value=${LATEST},enable=${{ env.IS_RELEASE_FROM_FILE == 'true' && github.ref == 'refs/heads/main' }}"
+            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
       - name: Compute image tags (branch-stream)
         if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source != 'file'
         id: tags_branch
+        env:
+          COMPOSER_MODE: ${{ matrix.composer }}
         run: |
-          # master / develop builds — only branch tags + dated snapshot, no latest/major
+          SUF=""
+          [ "$COMPOSER_MODE" = "rolling" ] && SUF="-rolling"
+          # master / develop builds — branch tags + dated snapshot, no latest/major
           {
             echo "tags<<__EOF__"
             for t in $(echo "${{ matrix.track.tags_extra }}" | tr ',' ' '); do
-              echo "type=raw,value=$t"
+              echo "type=raw,value=${t}${SUF}"
             done
-            echo "type=raw,value=${{ steps.ref.outputs.version }}"
-            echo "type=sha,prefix=sha-"
+            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}"
+            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
@@ -211,10 +226,11 @@ jobs:
             SNIPE_IT_VERSION=${{ steps.ref.outputs.ref }}
             BUILD_DATE=${{ steps.ref.outputs.build_date }}
             VCS_REF=${{ github.sha }}
+            ROLLING_DEPS=${{ matrix.composer == 'rolling' }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha,scope=${{ matrix.track.name }}
-          cache-to: type=gha,scope=${{ matrix.track.name }},mode=max
+          cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}
+          cache-to: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }},mode=max
 
       - name: Attest build provenance
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
