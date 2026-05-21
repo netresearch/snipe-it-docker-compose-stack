@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Static checks for the snipe-it-docker-compose-stack repo.
+#
+# Splits into:
+#   - container-lint  → delegates Dockerfile (hadolint) + shellcheck on shipped
+#                       scripts to netresearch/.github's reusable
+#                       lint-container.yml. Pinned to the feature branch until
+#                       PR netresearch/.github#141 merges; flip to @main then.
+#   - compose-validate → stays inline. Validates docker compose config with
+#                        repo-specific .env.example placeholder substitution
+#                        (caller-specific shape that doesn't generalise).
+#   - yamllint         → stays inline. The repo has no .yamllint.yml config
+#                        file; rules are passed via config_data here to keep
+#                        the contract local.
 
 name: lint
 
@@ -14,26 +28,13 @@ permissions:
   contents: read
 
 jobs:
-  hadolint:
-    name: hadolint (Dockerfile)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      # hadolint/hadolint-action@v3.1.0 bundles hadolint v2.12.0 (Mar 2023),
-      # which predates Docker 25's HEALTHCHECK --start-interval flag and
-      # crashes with "invalid flag: --start-interval" on any Dockerfile
-      # that uses it. Use `hadolint:latest-alpine` directly so we track
-      # current hadolint releases (the action wraps the same image but
-      # version-pinned to whenever the action shipped).
-      - name: hadolint (via latest-alpine image)
-        run: |
-          docker run --rm -i \
-            -v "${{ github.workspace }}/.hadolint.yaml:/.config/hadolint.yaml:ro" \
-            hadolint/hadolint:latest-alpine \
-            hadolint --config /.config/hadolint.yaml --failure-threshold warning - \
-            < Dockerfile
+  container-lint:
+    # hadolint (always) + shellcheck (because shell-scandirs is set).
+    uses: netresearch/.github/.github/workflows/lint-container.yml@feat/reusable-container-workflows
+    permissions:
+      contents: read
+    with:
+      shell-scandirs: ./rootfs/usr/local/bin ./bin
 
   compose-validate:
     name: docker compose config
@@ -53,17 +54,6 @@ jobs:
             .env
           docker compose config --quiet
           docker compose -f compose.yml config --quiet
-
-  shellcheck:
-    name: shellcheck (entrypoint + scripts)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
-        with:
-          scandir: ./rootfs/usr/local/bin ./bin
 
   yamllint:
     name: yamllint
