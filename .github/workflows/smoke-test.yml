@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   image-surface:
-    uses: netresearch/.github/.github/workflows/smoke-test-container.yml@feat/reusable-container-workflows
+    uses: netresearch/.github/.github/workflows/smoke-test-container.yml@main
     permissions:
       contents: read
     with:
