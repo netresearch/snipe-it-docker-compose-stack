@@ -168,7 +168,13 @@ RUN set -eux; \
     # Our snipe-it.ini's opcache.* settings still apply unchanged.
     && docker-php-ext-install -j"$(nproc)" \
         bcmath gd intl ldap mbstring pdo_mysql xml zip \
-    && pecl install redis \
+    # Pin pecl redis to a specific stable version for reproducible builds.
+    # Unpinned `pecl install redis` resolves to whatever is latest at build
+    # time — changes silently between rebuilds and can introduce ABI/behaviour
+    # drift. 6.3.0 (released 2025-11-06) is the current stable on pecl as of
+    # this image. Bump deliberately + verify Snipe-IT cache/session paths
+    # still work when upgrading.
+    && pecl install redis-6.3.0 \
     && docker-php-ext-enable redis \
     && apk del .ext-build-deps \
     && rm -rf /tmp/* /var/cache/apk/* /usr/src/php* /usr/local/lib/php/test \
@@ -203,10 +209,22 @@ RUN set -eux; \
 # a tmpfs here; this RUN is the fallback if the image is run standalone.
 RUN mkdir -p /run/php-fpm && chown www-data:www-data /run/php-fpm
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+# --start-interval=5s probes every 5s during the 120s start_period instead of
+# waiting up to the full --interval=30s between checks. Means `docker compose
+# up --wait` returns as soon as php-fpm actually accepts FastCGI (typically
+# 10-20s), not 30s+ later. Once the container reports healthy, the normal
+# 30s interval takes over.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --start-interval=5s --retries=3 \
     CMD SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET \
         cgi-fcgi -bind -connect /run/php-fpm/snipeit.sock 2>/dev/null \
         | grep -q "pong" || exit 1
+
+# Graceful php-fpm shutdown signal. tini forwards the orchestrator's SIGTERM
+# unchanged, but php-fpm interprets SIGTERM as "fast shutdown" — it kills
+# in-flight requests immediately. SIGQUIT is php-fpm's "graceful shutdown"
+# signal: drain active workers, finish in-flight requests, then exit. Critical
+# during rolling updates so users mid-request don't see 502s.
+STOPSIGNAL SIGQUIT
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["php-fpm", "--nodaemonize"]

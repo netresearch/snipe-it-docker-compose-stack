@@ -29,6 +29,11 @@ services:
       - "3306:3306"
 
   valkey:
+    # Heads-up: 6379 is the default Redis/Valkey port. If you already run a
+    # local Redis/Valkey on the host, `docker compose up` will fail with
+    # "bind: address already in use". Comment out the mapping below, or
+    # remap to a free host port (e.g. "16379:6379") if you don't need
+    # external access to this container's Valkey from the host.
     ports:
       - "6379:6379"
 

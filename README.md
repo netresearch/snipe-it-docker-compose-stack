@@ -15,19 +15,26 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
 ## What's in the stack
 
 ```
-        ┌─── web ─────── nginx:alpine
-        │
-   client ──► db ──── mariadb:11 (binlog enabled)
-        │
-        ├─── valkey ─── valkey/valkey:9-alpine
-        │
-        ├─── app ───── ghcr.io/netresearch/snipe-it-php-fpm   ◄── built daily
-        │              │
-        │              ├─◄ scheduler ── ghcr.io/netresearch/ofelia
-        │              │      (runs `php artisan schedule:run` per minute)
-        │              │
-        └─── backup ── ghcr.io/netresearch/phpbu-docker
-                       └─◄ (same ofelia drives nightly `phpbu` runs)
+                          ┌──────────────────────────────────────────────┐
+                          │  internal compose network (`snipeit`)        │
+                          │                                              │
+   client ──HTTP──► web ──┼──► app  ── ghcr.io/netresearch/snipe-it-php-fpm  ◄── built daily
+       (8000)    nginx    │     │
+                 :alpine  │     ├──► db      ── mariadb:11 (binlog enabled)
+                          │     │
+                          │     └──► valkey  ── valkey/valkey:9-alpine
+                          │                                              │
+                          │     scheduler ── ghcr.io/netresearch/ofelia  │
+                          │       │ (runs `php artisan schedule:run`     │
+                          │       │  per minute against `app`)           │
+                          │       │                                      │
+                          │       └─► backup ── ghcr.io/netresearch/phpbu-docker
+                          │              (nightly `phpbu` driven by ofelia)
+                          └──────────────────────────────────────────────┘
+
+   Only `web` is reachable from the host (port 8000 by default).
+   `db`, `valkey`, `app`, `scheduler`, `backup` have no host-published ports
+   in the default stack — they talk to each other on the internal network.
 
    one-shot init: `app-assets` populates a shared volume with Snipe-IT's
    public/ files so nginx can serve them statically.
@@ -84,6 +91,17 @@ make logs-app                          # Ctrl-C stops the tail (does NOT stop th
 ```
 
 `make help` lists every target — backup, upgrade, clean, artisan, health, etc.
+
+### Running artisan / tinker
+
+The stack ships convenience wrappers around `docker compose exec app php artisan`:
+
+```bash
+make artisan CMD="route:list"          # any one-shot artisan command
+make artisan CMD="snipeit:backup"
+make tinker                             # interactive Laravel REPL
+make shell                              # plain shell inside the app container
+```
 
 For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make init` and run `make restart`. The reverse-proxy overlay at [`examples/compose.traefik.yml`](examples/compose.traefik.yml) handles TLS termination.
 

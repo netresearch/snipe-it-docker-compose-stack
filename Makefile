@@ -89,6 +89,39 @@ test-snipeit: ## Build tester stage — runs Snipe-IT's own phpunit suite, fails
 	docker buildx build --target tester --platform linux/amd64 .
 
 # ────────────────────────────────────────────────────────────────────
+# Dev convenience
+# ────────────────────────────────────────────────────────────────────
+
+dev: ## Seed compose.override.yml from the example (if missing) + `make up`
+	@if [ ! -f compose.override.yml ]; then \
+		cp compose.override.yml.example compose.override.yml; \
+		printf '\033[1;34m[make]\033[0m seeded compose.override.yml from example\n'; \
+	else \
+		printf '\033[1;34m[make]\033[0m compose.override.yml already present — keeping\n'; \
+	fi
+	$(MAKE) up
+
+build: ## Build the runtime image locally (snipe-it-php-fpm:local) — no push
+	docker buildx build --target runtime --platform linux/amd64 --load \
+		-t snipe-it-php-fpm:local \
+		--build-arg SNIPE_IT_VERSION=$$(cat .snipe-it-version) .
+
+lint: ## Run hadolint + shellcheck + yamllint via Docker (no local install)
+	@printf '\033[1;34m[lint]\033[0m hadolint Dockerfile\n'
+	docker run --rm -i -v $(CURDIR):/work -w /work \
+		hadolint/hadolint:latest-alpine \
+		hadolint --config .hadolint.yaml Dockerfile
+	@printf '\033[1;34m[lint]\033[0m shellcheck rootfs/usr/local/bin + bin\n'
+	docker run --rm -v $(CURDIR):/work -w /work \
+		koalaman/shellcheck:stable \
+		$$(find rootfs/usr/local/bin bin -type f \( -name '*.sh' -o -perm -u+x \) 2>/dev/null)
+	@printf '\033[1;34m[lint]\033[0m yamllint compose + workflows\n'
+	docker run --rm -v $(CURDIR):/work -w /work \
+		cytopia/yamllint:1 \
+		-d "{extends: default, rules: {line-length: disable, document-start: disable, truthy: {check-keys: false}, comments: {min-spaces-from-content: 1}}}" \
+		.github/workflows .hadolint.yaml compose.yml
+
+# ────────────────────────────────────────────────────────────────────
 # Upgrade
 # ────────────────────────────────────────────────────────────────────
 
@@ -107,9 +140,21 @@ shell: ## Shell into the app container
 artisan: ## Run an artisan command (use: make artisan CMD="route:list")
 	docker compose exec app php /var/www/html/artisan $(CMD)
 
+tinker: ## Open an interactive REPL inside the app container (php artisan tinker)
+	docker compose exec app php /var/www/html/artisan tinker
+
+restore: ## Print pointer to the disaster-recovery runbook (not automated)
+	@printf '\033[1;33m[restore]\033[0m This target intentionally does NOT automate restore.\n'
+	@printf '         Restoring is destructive and context-specific — follow the\n'
+	@printf '         runbook step by step:\n\n'
+	@printf '           docs/runbook-restore.md\n\n'
+	@printf '         TL;DR: stop app+scheduler, pick a dump from the backups volume,\n'
+	@printf '         drop+recreate the database, gunzip | mariadb, restore uploads/\n'
+	@printf '         and storage/ tarballs, then `make restart`.\n'
+
 clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
-	@read -r -p "This deletes ALL data including the database. Type 'yes' to proceed: " ans; \
+	@read -r -p "This deletes ALL data — the database, uploads AND the backups volume. Type 'yes' to proceed: " ans; \
 	  [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	docker compose down -v
 
-.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit pull upgrade shell artisan clean
+.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit dev build lint pull upgrade shell artisan tinker restore clean

@@ -59,6 +59,9 @@ write_env() {
   mv "$tmp" "$ENV_FILE"
 }
 
+# NOTE: output is NOT valid base64 — padding (`=`) and URL-unsafe chars (`/`, `+`)
+# are stripped. It's a 32-char URL-safe random string used as a DB password,
+# chosen to avoid env-quoting / shell-escaping surprises in .env / docker-compose.
 random_pw() {
   # 32 chars URL-safe base64; no '/', '+', '=' to avoid env-quoting surprises
   openssl rand -base64 32 | tr -d '/+=\n' | head -c 32

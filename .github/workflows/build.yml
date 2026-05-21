@@ -250,3 +250,27 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      # ─ Keyless cosign signing ───────────────────────────────────────────
+      # Complements the SLSA provenance attestation above with a cosign
+      # signature on the image manifest. The two are NOT duplicates:
+      #   * `attest-build-provenance` attaches an in-toto SLSA predicate
+      #     describing HOW the artefact was built (verifiable via
+      #     `gh attestation verify` or `cosign verify-attestation`).
+      #   * `cosign sign` attaches an OIDC-bound signature proving WHO/WHAT
+      #     workflow signed it (verifiable via `cosign verify` with the
+      #     workflow identity / certificate-identity-regexp).
+      # Both land in the Rekor transparency log; consumers may pin to
+      # either or both depending on their policy engine (Sigstore policy
+      # controller, Kyverno, OPA, …).
+      - name: Install cosign
+        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign image with cosign (keyless / OIDC)
+        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE_REF"
