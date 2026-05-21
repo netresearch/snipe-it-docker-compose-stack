@@ -230,6 +230,12 @@ For disaster recovery (lost DB / corrupted volume), [`docs/runbook-restore.md`](
 - [netresearch/ofelia](https://github.com/netresearch/ofelia) — the scheduler this stack uses
 - [netresearch/phpbu-docker](https://github.com/netresearch/phpbu-docker) — the backup engine this stack uses
 
+## Roadmap notes
+
+- **Reusable workflows.** The five workflows in `.github/workflows/` overlap heavily with patterns used by sibling container repos (e.g. `netresearch/phpbu-docker`). Track [#TODO](https://github.com/netresearch/snipe-it-docker-compose-stack/issues) for centralisation under `netresearch/.github` (analog to the go-workflows pattern) so consumers become thin callers.
+- **arm64 native runners.** Multi-arch builds currently use QEMU emulation (~40 min wall-time). Splitting amd64 + arm64 onto separate jobs (`ubuntu-latest` + `ubuntu-24.04-arm`) and joining via manifest list would cut wall-time to ~15 min.
+- **First release tag.** Once the daily-rebuild cycle has produced 1-2 weeks of green builds, cut `v0.1.0` to seed a release workflow.
+
 ## Contributing
 
 PRs welcome. Standard community files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY) inherit from [Netresearch's org-level `.github` repo](https://github.com/netresearch/.github).

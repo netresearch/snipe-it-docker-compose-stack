@@ -16,7 +16,7 @@ set -euo pipefail
 umask 077
 
 cd "$(cd "$(dirname "$0")/.." && pwd)" || { echo "init: cannot cd repo root" >&2; exit 1; }
-[ -f compose.yml ] || { echo "init: compose.yml not found at repo root" >&2; exit 1; }
+[[ -f compose.yml ]] || { echo "init: compose.yml not found at repo root" >&2; exit 1; }
 
 ENV_FILE=".env"
 ENV_EXAMPLE=".env.example"
@@ -29,8 +29,8 @@ fail() { printf '\033[1;31m[init]\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------
 # 1. Bootstrap .env from .env.example if missing
 # ---------------------------------------------------------------------
-if [ ! -f "$ENV_FILE" ]; then
-  [ -f "$ENV_EXAMPLE" ] || fail "$ENV_EXAMPLE not found — run from repo root"
+if [[ ! -f "$ENV_FILE" ]]; then
+  [[ -f "$ENV_EXAMPLE" ]] || fail "$ENV_EXAMPLE not found — run from repo root"
   cp "$ENV_EXAMPLE" "$ENV_FILE"
   log "created $ENV_FILE from $ENV_EXAMPLE"
 fi
@@ -71,7 +71,7 @@ random_pw() {
 # 3. APP_KEY — generate via Laravel artisan if empty
 # ---------------------------------------------------------------------
 APP_KEY_CURRENT=$(read_env APP_KEY)
-if [ -z "$APP_KEY_CURRENT" ]; then
+if [[ -z "$APP_KEY_CURRENT" ]]; then
   log "APP_KEY empty — generating via artisan key:generate"
   command -v docker >/dev/null 2>&1 \
     || fail "docker not found — install docker first"
@@ -93,7 +93,7 @@ if [ -z "$APP_KEY_CURRENT" ]; then
   fi
   KEY=$(grep -oE '^base64:[A-Za-z0-9+/=]+' "$TMP_OUT" | tail -1)
   rm -f "$TMP_OUT" "$TMP_ERR"
-  [ -n "$KEY" ] || fail "could not extract APP_KEY from artisan output"
+  [[ -n "$KEY" ]] || fail "could not extract APP_KEY from artisan output"
   write_env APP_KEY "$KEY"
   log "wrote APP_KEY=base64:<32 bytes>"
 else
@@ -105,7 +105,7 @@ fi
 # ---------------------------------------------------------------------
 for var in DB_PASSWORD DB_ROOT_PASSWORD; do
   CUR=$(read_env "$var")
-  if [ -z "$CUR" ]; then
+  if [[ -z "$CUR" ]]; then
     NEW=$(random_pw)
     write_env "$var" "$NEW"
     log "wrote $var=<32 random chars>"
@@ -118,7 +118,7 @@ done
 # 5. Sanity: APP_URL present (default from .env.example is http://localhost:8000)
 # ---------------------------------------------------------------------
 APP_URL_CURRENT=$(read_env APP_URL)
-if [ -z "$APP_URL_CURRENT" ]; then
+if [[ -z "$APP_URL_CURRENT" ]]; then
   write_env APP_URL "http://localhost:8000"
   log "wrote APP_URL=http://localhost:8000 (override for public deployment)"
 fi

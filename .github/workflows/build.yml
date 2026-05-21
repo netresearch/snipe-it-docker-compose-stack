@@ -104,7 +104,7 @@ jobs:
 
       - name: Checkout
         if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -112,10 +112,14 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         id: ref
         env:
+          # Inputs are passed via env vars (NOT shell interpolation) so that
+          # workflow_dispatch values containing shell metacharacters can't
+          # become command injection. SonarCloud rule githubactions:S7630.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_SOURCE: ${{ matrix.track.ref_source }}
+          INPUT_VERSION: ${{ inputs.snipe_it_version }}
+          TRACK_NAME: ${{ matrix.track.name }}
         run: |
-          REF_SOURCE='${{ matrix.track.ref_source }}'
-          INPUT_VERSION='${{ inputs.snipe_it_version }}'
           if [ "$REF_SOURCE" = "file" ]; then
             if [ -n "$INPUT_VERSION" ]; then
               REF="$INPUT_VERSION"
@@ -144,19 +148,19 @@ jobs:
             echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo "date_tag=$(date -u +'%Y%m%d')"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved: track=${{ matrix.track.name }} ref=$REF version=$VERSION"
+          echo "Resolved: track=$TRACK_NAME ref=$REF version=$VERSION"
 
       - name: Set up QEMU
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Log in to ghcr.io
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -166,24 +170,39 @@ jobs:
         if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source == 'file'
         id: tags_tag
         env:
+          # All ${{ ... }} interpolation goes through env vars rather than
+          # directly into the run-script body — sonarcloud rule
+          # githubactions:S7630 (shell injection).
           IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
           COMPOSER_MODE: ${{ matrix.composer }}
+          REF_VERSION: ${{ steps.ref.outputs.version }}
+          REF_DATE_TAG: ${{ steps.ref.outputs.date_tag }}
+          REF_MAJOR_MINOR: ${{ steps.ref.outputs.major_minor }}
+          REF_MAJOR: ${{ steps.ref.outputs.major }}
+          IS_MAIN_REF: ${{ github.ref == 'refs/heads/main' }}
         run: |
           # Suffix derived from composer mode:
           #   pinned  -> '' (bare tags — 8.5.0, 8.5, 8, latest)
           #   rolling -> '-rolling' (8.5.0-rolling, 8.5-rolling, 8-rolling, rolling)
           SUF=""
           LATEST="latest"
-          [ "$COMPOSER_MODE" = "rolling" ] && { SUF="-rolling"; LATEST="rolling"; }
+          if [ "$COMPOSER_MODE" = "rolling" ]; then
+            SUF="-rolling"
+            LATEST="rolling"
+          fi
+          ENABLE_LATEST="false"
+          if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
+            ENABLE_LATEST="true"
+          fi
           {
             echo "tags<<__EOF__"
-            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}"
-            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}-${{ steps.ref.outputs.date_tag }}"
-            echo "type=raw,value=${{ steps.ref.outputs.major_minor }}${SUF}"
-            echo "type=raw,value=${{ steps.ref.outputs.major }}${SUF}"
+            echo "type=raw,value=${REF_VERSION}${SUF}"
+            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
+            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
+            echo "type=raw,value=${REF_MAJOR}${SUF}"
             # `latest` (pinned) / `rolling` (rolling-latest) only when the build
-            # is from the .snipe-it-version file AND ref is main
-            echo "type=raw,value=${LATEST},enable=${{ env.IS_RELEASE_FROM_FILE == 'true' && github.ref == 'refs/heads/main' }}"
+            # is from the .snipe-it-version file AND ref is main.
+            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
             echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
@@ -193,16 +212,21 @@ jobs:
         id: tags_branch
         env:
           COMPOSER_MODE: ${{ matrix.composer }}
+          TAGS_EXTRA: ${{ matrix.track.tags_extra }}
+          REF_VERSION: ${{ steps.ref.outputs.version }}
         run: |
           SUF=""
-          [ "$COMPOSER_MODE" = "rolling" ] && SUF="-rolling"
+          if [ "$COMPOSER_MODE" = "rolling" ]; then
+            SUF="-rolling"
+          fi
           # master / develop builds — branch tags + dated snapshot, no latest/major
           {
             echo "tags<<__EOF__"
-            for t in $(echo "${{ matrix.track.tags_extra }}" | tr ',' ' '); do
+            # shellcheck disable=SC2086 # word-split intentional on comma list
+            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
               echo "type=raw,value=${t}${SUF}"
             done
-            echo "type=raw,value=${{ steps.ref.outputs.version }}${SUF}"
+            echo "type=raw,value=${REF_VERSION}${SUF}"
             echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
@@ -210,7 +234,7 @@ jobs:
       - name: Extract metadata
         if: steps.gate.outputs.skip != 'true'
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
@@ -225,7 +249,7 @@ jobs:
       - name: Build (and push if not PR)
         if: steps.gate.outputs.skip != 'true'
         id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
@@ -245,7 +269,7 @@ jobs:
 
       - name: Attest build provenance
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -265,7 +289,7 @@ jobs:
       # controller, Kyverno, OPA, …).
       - name: Install cosign
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign image with cosign (keyless / OIDC)
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
