@@ -1,0 +1,130 @@
+name: build
+
+on:
+  # Daily rebuild — picks up base-image CVE fixes, fresh composer deps
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'examples/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      snipe_it_version:
+        description: 'Snipe-IT git tag to build (default: read .snipe-it-version)'
+        required: false
+        default: ''
+      push:
+        description: 'Push image to ghcr.io (false for dry-run)'
+        type: boolean
+        required: false
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/snipe-it
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Determine Snipe-IT version
+        id: version
+        run: |
+          if [ -n "${{ inputs.snipe_it_version }}" ]; then
+            VERSION="${{ inputs.snipe_it_version }}"
+          else
+            VERSION=$(tr -d '[:space:]' < .snipe-it-version)
+          fi
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          DATE_TAG=$(date -u +'%Y%m%d')
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+          {
+            echo "snipe_it=$VERSION"
+            echo "build_date=$BUILD_DATE"
+            echo "date_tag=$DATE_TAG"
+            echo "major=$MAJOR"
+            echo "major_minor=$MAJOR_MINOR"
+          } >> "$GITHUB_OUTPUT"
+          echo "Snipe-IT version: $VERSION"
+          echo "Tags will be: $VERSION, $VERSION-$DATE_TAG, $MAJOR_MINOR, $MAJOR, latest"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request' && inputs.push != false
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.snipe_it }}
+            type=raw,value=${{ steps.version.outputs.snipe_it }}-${{ steps.version.outputs.date_tag }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=sha,prefix=sha-
+          labels: |
+            org.opencontainers.image.title=snipe-it
+            org.opencontainers.image.description=Hardened Snipe-IT ${{ steps.version.outputs.snipe_it }} on PHP 8.5 / Alpine
+            org.opencontainers.image.version=${{ steps.version.outputs.snipe_it }}
+            org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      - name: Build (and push if not PR)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: runtime
+          push: ${{ github.event_name != 'pull_request' && inputs.push != false }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SNIPE_IT_VERSION=${{ steps.version.outputs.snipe_it }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request' && inputs.push != false
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

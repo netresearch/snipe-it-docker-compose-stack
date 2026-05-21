@@ -1,0 +1,52 @@
+# compose.override.yml.example — dev overrides
+#
+# Copy to compose.override.yml and `docker compose up -d` will merge it.
+#
+# Adds:
+#   - mailpit (SMTP sink + web UI on http://localhost:8025)
+#   - exposes db port on host:3306
+#   - exposes redis port on host:6379
+#   - flips APP_DEBUG=true for the app
+#   - opcache validate_timestamps=1 for hot-reload of code (only useful if
+#     you bind-mount source from the host, not for the default image-baked code)
+
+services:
+  app:
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      MAIL_ENCRYPTION: ""
+      MAIL_USERNAME: ""
+      MAIL_PASSWORD: ""
+
+  db:
+    ports:
+      - "3306:3306"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # web UI
+      - "1025:1025"   # SMTP (also reachable as mailpit:1025 from app)
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    networks:
+      - snipeit
+
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    networks:
+      - snipeit

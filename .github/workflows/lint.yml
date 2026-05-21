@@ -1,0 +1,77 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hadolint:
+    name: hadolint (Dockerfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate compose.yml
+        run: |
+          cp .env.example .env
+          # supply just-good-enough placeholders so validation passes
+          sed -i \
+            -e 's/^APP_KEY=$/APP_KEY=base64:CI_PLACEHOLDER_KEY_NOT_FOR_RUNTIME_USE_ONLY===/' \
+            -e 's/^DB_PASSWORD=$/DB_PASSWORD=ci-placeholder/' \
+            -e 's/^DB_ROOT_PASSWORD=$/DB_ROOT_PASSWORD=ci-placeholder/' \
+            .env
+          docker compose config --quiet
+          docker compose -f compose.yml config --quiet
+
+  shellcheck:
+    name: shellcheck (entrypoint + scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ludeeus/action-shellcheck@2.0.0
+        env:
+          SHELLCHECK_OPTS: -e SC2086 -e SC1091
+        with:
+          scandir: ./rootfs/usr/local/bin
+
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: .github/workflows .hadolint.yaml compose.yml
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              document-start: disable
+              truthy:
+                check-keys: false
+              comments:
+                min-spaces-from-content: 1
