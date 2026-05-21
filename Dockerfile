@@ -181,18 +181,28 @@ RUN set -eux; \
         /usr/local/lib/php/doc
 
 WORKDIR /var/www/html
-COPY --from=builder --chown=www-data:www-data /build /var/www/html
+# Defense-in-depth: application code is owned by root and readable (not
+# writable) by the www-data group. This means a compromised php-fpm worker
+# (UID www-data) cannot modify Snipe-IT's PHP source, vendor/, or public/
+# assets at runtime. The dirs www-data legitimately needs to write to
+# (storage/, bootstrap/cache/, /var/lib/snipeit) are chown'd www-data:www-data
+# in the explicit RUN below — and again in entrypoint.sh at container start
+# to cope with fresh named-volume mounts that mask the image's chown.
+# (SonarCloud security hotspot: dockerfile:S6470 — copied resources should
+# not be writable by the runtime user.)
+COPY --from=builder --chown=root:www-data /build /var/www/html
 COPY rootfs/ /
 
-# Surface the dependency manifest for ops debugging:
-#   docker exec snipe-it cat /var/lib/snipeit/deps.txt
-RUN mkdir -p /var/lib/snipeit \
-    && cp /var/www/html/deps-manifest.txt /var/lib/snipeit/deps.txt \
-    && chmod 0644 /var/lib/snipeit/deps.txt \
-    && rm -f /var/www/html/deps-manifest.txt
-
+# Surface the dependency manifest for ops debugging
+# (`docker exec snipe-it cat /var/lib/snipeit/deps.txt`), prepare the
+# writable surfaces for the www-data process, and mark entrypoint executable.
+# Single RUN so we ship one image layer instead of three (SonarCloud
+# docker:S7031 — consecutive RUN instructions should be merged).
 RUN set -eux; \
     mkdir -p /var/lib/snipeit \
+    && cp /var/www/html/deps-manifest.txt /var/lib/snipeit/deps.txt \
+    && chmod 0644 /var/lib/snipeit/deps.txt \
+    && rm -f /var/www/html/deps-manifest.txt \
     && chown -R www-data:www-data \
         /var/www/html/storage \
         /var/www/html/bootstrap/cache \
