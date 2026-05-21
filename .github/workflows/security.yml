@@ -15,9 +15,12 @@
 name: security
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Trigger AFTER a successful build (build workflow pushed fresh images
+  # to ghcr.io). Running on `push` would race the build and try to scan
+  # a tag that doesn't exist yet.
+  workflow_run:
+    workflows: [build]
+    types: [completed]
     branches: [main]
   schedule:
     # Daily at 06:00 UTC — picks up CVEs disclosed since the last build.
@@ -38,6 +41,8 @@ env:
 jobs:
   trivy:
     name: trivy (${{ matrix.tag }})
+    # On workflow_run, only run if the upstream build actually succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,6 +82,8 @@ jobs:
           category: trivy-${{ matrix.tag }}
 
   osv-scanner:
+    # Same gate as trivy — only run on workflow_run if build succeeded.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     name: osv-scanner (${{ matrix.tag }} composer.lock)
     runs-on: ubuntu-latest
     permissions:

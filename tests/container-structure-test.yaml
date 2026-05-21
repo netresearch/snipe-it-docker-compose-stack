@@ -16,13 +16,15 @@ commandTests:
   - name: required PHP extensions loaded
     command: php
     args: ["-m"]
+    # PHP 8.5 lists opcache as "Zend OPcache" (Zend extension) — regex
+    # matches that. Other entries are regular PHP modules.
     expectedOutput:
       - "bcmath"
       - "gd"
       - "intl"
       - "ldap"
       - "mbstring"
-      - "opcache"
+      - "Zend OPcache"
       - "pdo_mysql"
       - "redis"
       - "zip"
