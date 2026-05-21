@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+<!-- Copyright (c) 2026 Netresearch DTT GmbH -->
+
 # Changelog
 
 All notable changes to this image are recorded here. Format follows
@@ -5,6 +8,12 @@ All notable changes to this image are recorded here. Format follows
 version tracks the upstream Snipe-IT release plus a date stamp.
 
 ## [Unreleased]
+
+### Changed
+- License: split AGPL-3.0 (initial) → MIT for code/configs + CC-BY-SA-4.0 for
+  prose. AGPL was wrong here — this repo is a deployment template, not a
+  derivative of Snipe-IT. The built image still bundles AGPL Snipe-IT and
+  redistributors are bound by those upstream terms.
 
 ### Added
 - Initial release: 6-service docker-compose stack with our own slim php-fpm image

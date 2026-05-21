@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.7
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
 
 # Snipe-IT php-fpm image — only PHP + the Snipe-IT app code.
 # Web serving (nginx), scheduling (ofelia), and DB (mariadb) live in

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
 # entrypoint.sh — runs as root before php-fpm takes over.
 #
 # Responsibilities:

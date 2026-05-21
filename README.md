@@ -1,8 +1,12 @@
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+<!-- Copyright (c) 2026 Netresearch DTT GmbH -->
+
 # Snipe-IT Docker Compose Stack
 
 [![Build Status](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/build.yml/badge.svg)](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/build.yml)
 [![Lint](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/lint.yml/badge.svg)](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/lint.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![License: MIT (code)](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE-MIT)
+[![License: CC-BY-SA-4.0 (content)](https://img.shields.io/badge/content-CC--BY--SA--4.0-green.svg)](LICENSE-CC-BY-SA-4.0)
 
 Opinionated, hardened, **daily-built** [Snipe-IT](https://snipeitapp.com/) deployment — a 6-service docker-compose stack with our own slim **PHP 8.5 / Alpine** php-fpm image, plus dev overrides with mailpit and adminer for friction-free local development.
 
@@ -180,4 +184,13 @@ PRs welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md). Security issues: see [`SE
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE) — matched to Snipe-IT upstream.
+This repository uses split licensing — the right tool for each part:
+
+| Path | License | Rationale |
+|---|---|---|
+| `Dockerfile`, `rootfs/`, `config/`, `compose*.yml`, `examples/`, `.github/`, `.snipe-it-version` | [MIT](LICENSE-MIT) | Code and code-shaped configuration |
+| `README.md`, `CHANGELOG.md`, `docs/**` (when added), `CONTRIBUTING.md`, `SECURITY.md` (when added) | [CC-BY-SA-4.0](LICENSE-CC-BY-SA-4.0) | Prose and documentation — share-alike keeps forks open |
+
+**The built image** (`ghcr.io/netresearch/snipe-it-php-fpm:*`) bundles AGPL-3.0 Snipe-IT application code from [grokability/snipe-it](https://github.com/grokability/snipe-it). Redistribution of the image is bound by the upstream AGPL-3.0 terms in addition to MIT for our build glue.
+
+This split follows the [Netresearch skill-repo licensing pattern](https://github.com/netresearch?q=skill).
