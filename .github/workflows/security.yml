@@ -44,6 +44,10 @@ jobs:
     # On workflow_run, only run if the upstream build actually succeeded.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    # `:rolling` may not exist in ghcr.io (rolling builds fail when upstream
+    # Snipe-IT's composer.json references a CVE-blocked major). Don't let
+    # missing-image errors fail the whole security workflow.
+    continue-on-error: ${{ matrix.tag == 'rolling' }}
     permissions:
       contents: read
       security-events: write   # SARIF upload to GitHub code-scanning
@@ -88,6 +92,8 @@ jobs:
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     name: osv-scanner (${{ matrix.tag }} composer.lock)
     runs-on: ubuntu-latest
+    # Same rationale as trivy — rolling image may not exist; don't propagate.
+    continue-on-error: ${{ matrix.tag == 'rolling' }}
     permissions:
       contents: read
     strategy:
