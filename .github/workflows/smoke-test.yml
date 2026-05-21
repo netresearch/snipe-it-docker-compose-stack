@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Netresearch DTT GmbH
+#
+# Smoke tests for the snipe-it-docker-compose-stack repo.
+#
+# Splits into:
+#   - image-surface     → delegates buildx --load amd64 +
+#                         container-structure-test to the netresearch/.github
+#                         reusable smoke-test-container.yml. Pinned to the
+#                         feature branch until PR netresearch/.github#141
+#                         merges; flip to @main then.
+#   - compose-up        → stays inline. Boots the full compose stack with
+#                         placeholder-substituted .env and probes / for
+#                         HTTP 200/302 — snipe-it-specific bootstrap and
+#                         known HTTP route.
+#   - init-idempotency  → stays inline. Verifies bin/init.sh is idempotent —
+#                         snipe-it-specific contract (APP_KEY / random PW
+#                         generation must not re-roll on second run).
+#   - upstream-tests    → stays inline. Builds the `tester` Dockerfile stage
+#                         which runs the upstream Snipe-IT phpunit suite —
+#                         snipe-it-specific target stage.
 
 name: smoke-test
 
@@ -28,30 +47,14 @@ concurrency:
 
 jobs:
   image-surface:
-    name: container-structure-test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
-      - name: Build amd64 image (load locally)
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          target: runtime
-          platforms: linux/amd64
-          load: true
-          tags: snipe-it-php-fpm:test
-          cache-from: type=gha,scope=smoke-test
-          cache-to: type=gha,scope=smoke-test,mode=max
-      - name: Install container-structure-test
-        run: |
-          curl -fsSL -o /tmp/cst \
-            "https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64"
-          sudo install /tmp/cst /usr/local/bin/container-structure-test
-      - name: Run image-surface tests
-        run: container-structure-test test --image snipe-it-php-fpm:test --config tests/container-structure-test.yaml
+    uses: netresearch/.github/.github/workflows/smoke-test-container.yml@feat/reusable-container-workflows
+    permissions:
+      contents: read
+    with:
+      image-tag: snipe-it-php-fpm:test
+      target: runtime
+      cst-config-path: tests/container-structure-test.yaml
+      cache-scope: smoke-test
 
   compose-up:
     name: stack boots healthy
