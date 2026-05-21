@@ -77,7 +77,19 @@ chown -R www-data:www-data \
   /var/www/html/storage \
   /var/www/html/bootstrap/cache \
   /var/lib/snipeit 2>/dev/null || true
-chmod -R u+rwX,g+rwX,o+rX /var/www/html/storage /var/www/html/bootstrap/cache
+# Only chmod the directories we just (potentially) created via mkdir -p above —
+# a recursive chmod across the whole storage tree pegs CPU for seconds on large
+# instances on every container start. Pre-existing files keep their modes.
+chmod 0775 \
+  /var/www/html/storage \
+  /var/www/html/storage/framework \
+  /var/www/html/storage/framework/cache \
+  /var/www/html/storage/framework/cache/data \
+  /var/www/html/storage/framework/sessions \
+  /var/www/html/storage/framework/views \
+  /var/www/html/storage/logs \
+  /var/www/html/bootstrap/cache \
+  /var/lib/snipeit 2>/dev/null || true
 
 # ---------------------------------------------------------------------
 # 4. Wait for DB (skip if SKIP_DB_WAIT=true)
@@ -87,14 +99,24 @@ if [ "${SKIP_DB_WAIT:-false}" != "true" ]; then
   log "waiting up to ${DB_WAIT_TIMEOUT}s for ${DB_HOST}:${DB_PORT}"
   i=0
   while [ "$i" -lt "$DB_WAIT_TIMEOUT" ]; do
-    if php -r "
+    # Read credentials via getenv() inside PHP — never interpolate $DB_PASSWORD
+    # into the shell command, since a single quote or shell metacharacter in
+    # the password would either break the PDO call or be a shell-injection
+    # vector if .env is ever attacker-controlled.
+    # shellcheck disable=SC2016 # intentional: PHP reads env vars itself
+    if php -r '
       try {
-        new PDO('mysql:host=${DB_HOST};port=${DB_PORT};dbname=${DB_DATABASE}',
-                '${DB_USERNAME}', '${DB_PASSWORD}',
-                [PDO::ATTR_TIMEOUT => 3]);
+        new PDO(
+          "mysql:host=" . getenv("DB_HOST")
+            . ";port=" . getenv("DB_PORT")
+            . ";dbname=" . getenv("DB_DATABASE"),
+          getenv("DB_USERNAME"),
+          getenv("DB_PASSWORD"),
+          [PDO::ATTR_TIMEOUT => 3]
+        );
         exit(0);
-      } catch (Exception \$e) { exit(1); }
-    " 2>/dev/null; then
+      } catch (Exception $e) { exit(1); }
+    ' 2>/dev/null; then
       log "DB reachable"
       break
     fi

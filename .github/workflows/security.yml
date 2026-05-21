@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Netresearch DTT GmbH
+#
+# CVE scanning for the published snipe-it-php-fpm images.
+#
+# Runs:
+#   - Trivy container scan against :latest and :rolling (HIGH/CRITICAL → fail,
+#     SARIF uploaded to GitHub code-scanning)
+#   - osv-scanner against the composer.lock baked into each image
+#     (CRITICAL → fail, lower severities informational)
+#
+# Scope is intentionally limited to vulnerability scanning. Scorecard, cosign
+# signing/verification, and SBOM attestation live in separate workflows.
+
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily at 06:00 UTC — picks up CVEs disclosed since the last build.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/snipe-it-php-fpm
+
+jobs:
+  trivy:
+    name: trivy (${{ matrix.tag }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # SARIF upload to GitHub code-scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        # `latest` = pinned-deps release line
+        # `rolling` = rolling-deps line (catches transitive CVEs)
+        tag: [latest, rolling]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Trivy — vulnerability scan (HIGH/CRITICAL, SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
+          format: sarif
+          output: trivy-${{ matrix.tag }}.sarif
+          severity: 'HIGH,CRITICAL'
+          # Build fails the moment Trivy finds a HIGH or CRITICAL CVE in the
+          # published image. Daily cron turns this into early warning for
+          # CVEs disclosed after the image was built.
+          exit-code: '1'
+          ignore-unfixed: 'true'
+          limit-severities-for-sarif: 'true'
+          vuln-type: 'os,library'
+
+      - name: Upload SARIF to code-scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@458d36d7d4f47d0dd16ca424c1d3cda0060f1360 # v3
+        with:
+          sarif_file: trivy-${{ matrix.tag }}.sarif
+          category: trivy-${{ matrix.tag }}
+
+  osv-scanner:
+    name: osv-scanner (${{ matrix.tag }} composer.lock)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [latest, rolling]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Extract composer.lock from image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
+        run: |
+          set -eux
+          mkdir -p osv-input
+          docker pull "$IMAGE"
+          CID=$(docker create "$IMAGE")
+          # Snipe-IT app code lives at /var/www/html (see Dockerfile runtime stage).
+          # composer.lock is committed upstream when ROLLING_DEPS=false (pinned line)
+          # and re-generated when ROLLING_DEPS=true (rolling line) — either way the
+          # final image ships with one.
+          docker cp "$CID":/var/www/html/composer.lock osv-input/composer.lock
+          docker rm "$CID" >/dev/null
+          ls -l osv-input/
+
+      - name: osv-scanner — composer.lock (fail on CRITICAL only)
+        # The osv-scanner-action sub-action exits non-zero on any finding.
+        # We run it twice on purpose:
+        #   1. Informational pass — surfaces all severities, never fails the job.
+        #   2. Gate pass — re-scans with --fail-on-severity=CRITICAL so only
+        #      CRITICAL CVEs break the build. Lower severities stay visible
+        #      in the previous step's logs.
+        id: osv_info
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --lockfile=osv-input/composer.lock
+
+      - name: osv-scanner — fail gate (CRITICAL only)
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --fail-on-severity=CRITICAL
+            --lockfile=osv-input/composer.lock

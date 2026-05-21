@@ -33,7 +33,9 @@ services:
       traefik.http.middlewares.snipeit-sec.headers.stsIncludeSubdomains: "true"
       traefik.http.middlewares.snipeit-sec.headers.stsPreload: "true"
       traefik.http.middlewares.snipeit-sec.headers.contentTypeNosniff: "true"
-      traefik.http.middlewares.snipeit-sec.headers.browserXssFilter: "true"
+      # X-XSS-Protection is set to "0" by nginx (modern browsers ignore the
+      # filter; CSP supersedes it). browserXssFilter was the legacy Traefik
+      # shortcut for X-XSS-Protection: 1 — drop it.
       traefik.http.routers.snipeit.middlewares: snipeit-sec
 
 networks:

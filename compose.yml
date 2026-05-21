@@ -24,8 +24,30 @@
 #   cp compose.override.yml.example compose.override.yml
 #
 # TLS / reverse proxy: see examples/compose.traefik.yml etc.
+#
+# Resource limits (mem_limit / cpus): sized for a small-org deployment
+# (single host, <=100 users). They are intentionally explicit & visible so
+# operators can tune them. For larger fleets, raise:
+#   - db.mem_limit (InnoDB buffer pool scales with dataset)
+#   - app.mem_limit (php-fpm pm.max_children * memory_limit; default 25*512M)
+#   - app.cpus     (more workers = more CPU)
+# Without these limits a stuck php-fpm pool can theoretically allocate
+# 25 * 512M = 12.5 GB and OOM the host.
+#
+# Logging: all services use json-file with 10m * 5 file rotation via the
+# x-logging anchor below. Override per-service if you need different sizing
+# or a different driver (journald, fluentd, ...).
 
 name: snipe-it
+
+# Shared logging policy — json-file with size-based rotation, keeps the
+# host disk safe from unbounded container log growth. 10 MiB per file,
+# max 5 files = 50 MiB cap per container.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 # Shared environment between app + scheduler-driven exec (both need full env
 # to be able to talk to db / redis / mail).
@@ -73,6 +95,9 @@ services:
   db:
     image: mariadb:11
     restart: unless-stopped
+    mem_limit: 2g
+    cpus: 2.0
+    logging: *logging
     environment:
       # Populated by `make init`; mariadb refuses to start with empty root
       # password — the failure is loud and the runbook clear.
@@ -110,6 +135,9 @@ services:
   valkey:
     image: valkey/valkey:9-alpine
     restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.5
+    logging: *logging
     command:
       - valkey-server
       - --appendonly
@@ -137,6 +165,9 @@ services:
   app-assets:
     image: ghcr.io/netresearch/snipe-it-php-fpm:${SNIPE_IT_IMAGE_TAG:-latest}
     restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+    logging: *logging
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -158,6 +189,9 @@ services:
   app:
     image: ghcr.io/netresearch/snipe-it-php-fpm:${SNIPE_IT_IMAGE_TAG:-latest}
     restart: unless-stopped
+    mem_limit: 1.5g
+    cpus: 2.0
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
@@ -191,6 +225,13 @@ services:
       - KILL           # php-fpm sends signals to workers
     tmpfs:
       - /tmp:mode=1777,size=128M,noexec,nosuid,nodev
+      # Mitigation for M1: `php artisan config:cache` writes generated PHP
+      # to bootstrap/cache/. Backing it with tmpfs prevents attacker-written
+      # PHP from persisting across restarts via the app-storage volume, even
+      # if opcache's validate_timestamps=0 would otherwise re-execute it.
+      # The entrypoint rebuilds the cache on every container start, so this
+      # is functionally equivalent to a persistent mount.
+      - /var/www/html/bootstrap/cache:mode=0755,size=32M,nosuid,nodev
     labels:
       # ofelia picks these up via the docker socket and runs them on a
       # schedule inside *this* container.
@@ -207,6 +248,9 @@ services:
   web:
     image: nginx:alpine
     restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    logging: *logging
     depends_on:
       app-assets:
         condition: service_completed_successfully
@@ -251,6 +295,9 @@ services:
   scheduler:
     image: ghcr.io/netresearch/ofelia:latest
     restart: unless-stopped
+    mem_limit: 64m
+    cpus: 0.25
+    logging: *logging
     depends_on:
       app:
         condition: service_started
@@ -276,6 +323,9 @@ services:
   backup:
     image: ghcr.io/netresearch/phpbu-docker:latest
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *logging
     depends_on:
       db:
         condition: service_healthy
