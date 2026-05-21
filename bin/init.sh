@@ -77,9 +77,12 @@ if [ -z "$APP_KEY_CURRENT" ]; then
 
   # Capture stdout (the key) and stderr separately so failures surface verbatim
   # instead of being mangled into the parse error.
+  # `--entrypoint php` bypasses the image's runtime entrypoint, which would
+  # otherwise hard-fail on missing APP_KEY (chicken-and-egg — we're trying
+  # to GENERATE the APP_KEY).
   TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
-  if ! docker run --rm --pull=missing "$IMAGE_FOR_KEYGEN" \
-        php /var/www/html/artisan key:generate --show --no-ansi \
+  if ! docker run --rm --pull=missing --entrypoint php "$IMAGE_FOR_KEYGEN" \
+        /var/www/html/artisan key:generate --show --no-ansi \
         >"$TMP_OUT" 2>"$TMP_ERR"; then
     cat "$TMP_ERR" >&2
     rm -f "$TMP_OUT" "$TMP_ERR"

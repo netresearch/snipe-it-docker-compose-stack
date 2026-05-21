@@ -86,9 +86,12 @@ jobs:
             -e 's|^DB_ROOT_PASSWORD=$|DB_ROOT_PASSWORD=ci-rootpw-not-secret|' \
             .env
           chmod 0600 .env
-      - name: docker compose up -d (uses locally-loaded image)
-        # --pull never: don't try to fetch ghcr (image is already loaded locally)
-        run: docker compose up -d --pull never --wait --wait-timeout 300
+      - name: docker compose up -d (uses locally-loaded image + pulls deps)
+        # The snipe-it-php-fpm:latest image is already in local docker store
+        # (from the previous buildx --load step), so compose won't re-pull
+        # it. The other services (mariadb, valkey, nginx, ofelia, phpbu) are
+        # pulled normally — `--pull missing` is the default.
+        run: docker compose up -d --wait --wait-timeout 300
       - name: Wait for HTTP 200/302 on /
         run: |
           for i in $(seq 1 30); do
