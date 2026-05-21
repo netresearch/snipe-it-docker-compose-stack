@@ -10,7 +10,13 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# Restrict file creation mode for the rest of the script — passwords land in
+# .env BEFORE the explicit chmod below, so umask is the only thing preventing
+# a 0644 readable window.
+umask 077
+
+cd "$(cd "$(dirname "$0")/.." && pwd)" || { echo "init: cannot cd repo root" >&2; exit 1; }
+[ -f compose.yml ] || { echo "init: compose.yml not found at repo root" >&2; exit 1; }
 
 ENV_FILE=".env"
 ENV_EXAMPLE=".env.example"
@@ -41,14 +47,16 @@ read_env() {
 
 write_env() {
   # Set KEY=VALUE in .env (line is created if missing).
-  local key="$1" value="$2"
-  if grep -qE "^${key}=" "$ENV_FILE"; then
-    # Escape | (used as sed delimiter) in the value
-    local escaped="${value//|/\\|}"
-    sed -i "s|^${key}=.*|${key}=${escaped}|" "$ENV_FILE"
-  else
-    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
-  fi
+  # awk-based replacement — sidesteps sed-escaping pitfalls (&, \, etc.)
+  local key="$1" value="$2" tmp
+  tmp=$(mktemp)
+  awk -v k="$key" -v v="$value" '
+    BEGIN { done=0 }
+    $0 ~ "^"k"=" { print k"="v; done=1; next }
+    { print }
+    END { if (!done) print k"="v }
+  ' "$ENV_FILE" > "$tmp"
+  mv "$tmp" "$ENV_FILE"
 }
 
 random_pw() {
@@ -62,17 +70,24 @@ random_pw() {
 APP_KEY_CURRENT=$(read_env APP_KEY)
 if [ -z "$APP_KEY_CURRENT" ]; then
   log "APP_KEY empty — generating via artisan key:generate"
-  if ! command -v docker >/dev/null 2>&1; then
-    fail "docker not found — install docker first"
+  command -v docker >/dev/null 2>&1 \
+    || fail "docker not found — install docker first"
+  docker info >/dev/null 2>&1 \
+    || fail "Docker daemon not reachable — start Docker Desktop / dockerd first"
+
+  # Capture stdout (the key) and stderr separately so failures surface verbatim
+  # instead of being mangled into the parse error.
+  TMP_OUT=$(mktemp); TMP_ERR=$(mktemp)
+  if ! docker run --rm --pull=missing "$IMAGE_FOR_KEYGEN" \
+        php /var/www/html/artisan key:generate --show --no-ansi \
+        >"$TMP_OUT" 2>"$TMP_ERR"; then
+    cat "$TMP_ERR" >&2
+    rm -f "$TMP_OUT" "$TMP_ERR"
+    fail "artisan key:generate failed (see stderr above)"
   fi
-  # `key:generate --show` prints the key to stdout
-  KEY=$(docker run --rm "$IMAGE_FOR_KEYGEN" \
-    php /var/www/html/artisan key:generate --show 2>&1 \
-    | tail -1 \
-    | tr -d '\r')
-  if [[ "$KEY" != base64:* ]]; then
-    fail "artisan output didn't look like a key (got: $KEY)"
-  fi
+  KEY=$(grep -oE '^base64:[A-Za-z0-9+/=]+' "$TMP_OUT" | tail -1)
+  rm -f "$TMP_OUT" "$TMP_ERR"
+  [ -n "$KEY" ] || fail "could not extract APP_KEY from artisan output"
   write_env APP_KEY "$KEY"
   log "wrote APP_KEY=base64:<32 bytes>"
 else

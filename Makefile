@@ -14,8 +14,15 @@ help: ## Show this help
 init: ## Bootstrap .env (APP_KEY + random DB passwords, idempotent)
 	@./bin/init.sh
 
-up: ## Start the stack (detached)
+up: .env ## Start the stack (detached)
 	docker compose up -d
+
+# Guard: bringing the stack up without a populated .env poisons the db-data
+# volume with an empty MARIADB_ROOT_PASSWORD that survives `make clean`.
+# This rule fails before docker compose sees the empty env vars.
+.env:
+	@printf '\033[1;31m[make]\033[0m No .env found — run `make init` first.\n' >&2
+	@exit 1
 
 down: ## Stop the stack (preserves volumes)
 	docker compose down

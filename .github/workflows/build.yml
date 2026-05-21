@@ -29,10 +29,17 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/snipe-it
+  IMAGE_NAME: ${{ github.repository_owner }}/snipe-it-php-fpm
 
 permissions:
   contents: read
+
+# Daily cron and direct pushes can race producing the same tag; serialise
+# them. Don't cancel in-progress: aborting a multi-arch buildx mid-push
+# leaves half-attached manifests.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
