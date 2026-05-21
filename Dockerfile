@@ -188,15 +188,19 @@ RUN set -eux; \
         /var/lib/snipeit \
     && chmod 0755 /usr/local/bin/entrypoint.sh
 
-# php-fpm listens on 9000; nginx in the web container reaches us via the
-# compose-internal network DNS name.
-EXPOSE 9000
+# php-fpm listens on a unix socket at /run/php-fpm/snipeit.sock (shared
+# tmpfs volume between `app` and `web` in compose). NO TCP port exposed.
+# Rationale: closes a FastCGI bypass — with TCP on 0.0.0.0:9000, any
+# sibling container on the snipeit network could speak FastCGI directly,
+# trivially bypassing nginx access control.
 
-# Validate php-fpm is up + reachable. From outside the container the web
-# service performs a higher-level Snipe-IT health check.
+# /run/php-fpm must exist for php-fpm to bind the socket — compose mounts
+# a tmpfs here; this RUN is the fallback if the image is run standalone.
+RUN mkdir -p /run/php-fpm && chown www-data:www-data /run/php-fpm
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET \
-        cgi-fcgi -bind -connect 127.0.0.1:9000 2>/dev/null \
+        cgi-fcgi -bind -connect /run/php-fpm/snipeit.sock 2>/dev/null \
         | grep -q "pong" || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]

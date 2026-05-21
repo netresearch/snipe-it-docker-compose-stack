@@ -38,6 +38,13 @@ x-app-env: &app-env
   APP_ENV: ${APP_ENV:-production}
   APP_DEBUG: ${APP_DEBUG:-false}
   TZ: ${TZ:-UTC}
+  # Pipe Laravel logs to container stdout in JSON — `docker compose logs app`
+  # now shows app errors instead of leaving them in a volume nobody checks.
+  LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
+  LOG_STDERR_FORMATTER: ${LOG_STDERR_FORMATTER:-Monolog\Formatter\JsonFormatter}
+  # Secure session cookie ON by default. Override to false ONLY in dev
+  # where you serve plain HTTP locally.
+  SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-true}
   DB_CONNECTION: mysql
   DB_HOST: db
   DB_PORT: 3306
@@ -142,6 +149,11 @@ services:
 
   # ---------------------------------------------------------------------
   # App — php-fpm with Snipe-IT
+  #
+  # Hardened: same posture as `web` — no-new-privileges, cap_drop ALL with
+  # the minimum re-adds php-fpm needs for chown/setuid, tmpfs for /tmp and
+  # /run/php-fpm (the unix socket lives in a shared tmpfs that `web` also
+  # mounts read-only).
   # ---------------------------------------------------------------------
   app:
     image: ghcr.io/netresearch/snipe-it-php-fpm:${SNIPE_IT_IMAGE_TAG:-latest}
@@ -157,16 +169,28 @@ services:
     volumes:
       - app-data:/var/lib/snipeit             # uploads / user content
       - app-storage:/var/www/html/storage     # Laravel storage (logs, cache, backups)
+      - fpm-sock:/run/php-fpm                 # php-fpm unix socket (shared with `web`)
     healthcheck:
       test:
         - CMD-SHELL
-        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9000 2>/dev/null | grep -q pong'
+        - 'SCRIPT_NAME=/ping SCRIPT_FILENAME=/ping REQUEST_METHOD=GET cgi-fcgi -bind -connect /run/php-fpm/snipeit.sock 2>/dev/null | grep -q pong'
       interval: 30s
       timeout: 10s
       start_period: 120s
       retries: 3
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # entrypoint chowns storage volume to www-data
+      - DAC_OVERRIDE   # entrypoint accesses files across uid boundaries
+      - FOWNER         # entrypoint chmods storage volume
+      - SETUID         # su-exec drops to www-data
+      - SETGID         # su-exec drops to www-data
+      - KILL           # php-fpm sends signals to workers
+    tmpfs:
+      - /tmp:mode=1777,size=128M,noexec,nosuid,nodev
     labels:
       # ofelia picks these up via the docker socket and runs them on a
       # schedule inside *this* container.
@@ -191,6 +215,7 @@ services:
     volumes:
       - app-public:/var/www/html/public:ro
       - app-storage:/var/www/html/storage:ro
+      - fpm-sock:/run/php-fpm:ro               # consume php-fpm socket
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./config/nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
@@ -296,6 +321,14 @@ volumes:
     name: snipeit-app-public
   backups:
     name: snipeit-backups
+  # tmpfs-backed shared volume for the php-fpm unix socket; populated by
+  # `app` at startup, consumed read-only by `web`.
+  fpm-sock:
+    name: snipeit-fpm-sock
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=8m,mode=0755"
 
 networks:
   snipeit:
