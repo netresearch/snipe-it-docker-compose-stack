@@ -4,7 +4,9 @@
 name: build
 
 on:
-  # Daily rebuild — picks up base-image CVE fixes, fresh composer deps
+  # Daily rebuild — picks up base-image CVE fixes, fresh composer deps,
+  # and rebuilds branch-tracking images (master / develop) against
+  # current upstream HEAD.
   schedule:
     - cron: '0 4 * * *'   # 04:00 UTC
   push:
@@ -17,15 +19,16 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      track:
+        description: 'Which stream to build (default: all 3)'
+        type: choice
+        required: false
+        default: 'all'
+        options: ['all', 'tag', 'master', 'develop']
       snipe_it_version:
-        description: 'Snipe-IT git tag to build (default: read .snipe-it-version)'
+        description: 'Override tag (only used with track=tag; default: read .snipe-it-version)'
         required: false
         default: ''
-      push:
-        description: 'Push image to ghcr.io (false for dry-run)'
-        type: boolean
-        required: false
-        default: true
 
 env:
   REGISTRY: ghcr.io
@@ -34,105 +37,187 @@ env:
 permissions:
   contents: read
 
-# Daily cron and direct pushes can race producing the same tag; serialise
-# them. Don't cancel in-progress: aborting a multi-arch buildx mid-push
-# leaves half-attached manifests.
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: build
+    name: build (${{ matrix.track.name }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        track:
+          # ─ stable release line — reads .snipe-it-version (Renovate-managed) ─
+          - name: tag
+            ref_source: file       # build.yml will read .snipe-it-version
+            tags_extra: ''         # plus the auto-generated 8.5.0 / 8.5 / 8 / latest tags
+          # ─ branch tracker: master (= last released code, may include
+          #   post-release commits) ─
+          - name: master
+            ref_source: master
+            tags_extra: 'master'
+          # ─ branch tracker: develop (= active dev branch, pre-release) ─
+          - name: develop
+            ref_source: develop
+            tags_extra: 'develop,nightly'
     steps:
+      - name: Filter — should this track run?
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          TRACK: ${{ matrix.track.name }}
+          INPUT_TRACK: ${{ inputs.track }}
+        run: |
+          # PR: only `tag` — keep CI fast.
+          if [ "$EVENT" = "pull_request" ] && [ "$TRACK" != "tag" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # workflow_dispatch with explicit track: only that track.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_TRACK" ] \
+              && [ "$INPUT_TRACK" != "all" ] && [ "$INPUT_TRACK" != "$TRACK" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
-      - name: Determine Snipe-IT version
-        id: version
+      - name: Resolve build ref for this track
+        if: steps.gate.outputs.skip != 'true'
+        id: ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -n "${{ inputs.snipe_it_version }}" ]; then
-            VERSION="${{ inputs.snipe_it_version }}"
+          REF_SOURCE='${{ matrix.track.ref_source }}'
+          INPUT_VERSION='${{ inputs.snipe_it_version }}'
+          if [ "$REF_SOURCE" = "file" ]; then
+            if [ -n "$INPUT_VERSION" ]; then
+              REF="$INPUT_VERSION"
+            else
+              REF=$(tr -d '[:space:]' < .snipe-it-version)
+            fi
+            VERSION="${REF#v}"                       # strip leading v for image tags
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+            IS_TAG=true
           else
-            VERSION=$(tr -d '[:space:]' < .snipe-it-version)
+            # Resolve current upstream SHA for the branch (master / develop)
+            REF="$REF_SOURCE"
+            SHA=$(gh api "repos/grokability/snipe-it/commits/${REF_SOURCE}" --jq '.sha')
+            VERSION="${REF_SOURCE}-$(date -u +%Y%m%d)-${SHA:0:7}"
+            MAJOR=""
+            MAJOR_MINOR=""
+            IS_TAG=false
           fi
-          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          DATE_TAG=$(date -u +'%Y%m%d')
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
           {
-            echo "snipe_it=$VERSION"
-            echo "build_date=$BUILD_DATE"
-            echo "date_tag=$DATE_TAG"
+            echo "ref=$REF"
+            echo "version=$VERSION"
             echo "major=$MAJOR"
             echo "major_minor=$MAJOR_MINOR"
+            echo "is_tag=$IS_TAG"
+            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "date_tag=$(date -u +'%Y%m%d')"
           } >> "$GITHUB_OUTPUT"
-          echo "Snipe-IT version: $VERSION"
-          echo "Tags will be: $VERSION, $VERSION-$DATE_TAG, $MAJOR_MINOR, $MAJOR, latest"
+          echo "Resolved: track=${{ matrix.track.name }} ref=$REF version=$VERSION"
 
       - name: Set up QEMU
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
+        if: steps.gate.outputs.skip != 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to ghcr.io
-        if: github.event_name != 'pull_request' && inputs.push != false
+        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags (tag-stream)
+        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source == 'file'
+        id: tags_tag
+        env:
+          IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
+        run: |
+          # Strip-v scheme matching phpbu pattern: 8.5.0 / 8.5 / 8 / latest
+          {
+            echo "tags<<__EOF__"
+            echo "type=raw,value=${{ steps.ref.outputs.version }}"
+            echo "type=raw,value=${{ steps.ref.outputs.version }}-${{ steps.ref.outputs.date_tag }}"
+            echo "type=raw,value=${{ steps.ref.outputs.major_minor }}"
+            echo "type=raw,value=${{ steps.ref.outputs.major }}"
+            # `latest` only when this build is from the .snipe-it-version file,
+            # NOT from a workflow_dispatch override on an older version
+            echo "type=raw,value=latest,enable=${{ env.IS_RELEASE_FROM_FILE == 'true' && github.ref == 'refs/heads/main' }}"
+            echo "type=sha,prefix=sha-"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags (branch-stream)
+        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source != 'file'
+        id: tags_branch
+        run: |
+          # master / develop builds — only branch tags + dated snapshot, no latest/major
+          {
+            echo "tags<<__EOF__"
+            for t in $(echo "${{ matrix.track.tags_extra }}" | tr ',' ' '); do
+              echo "type=raw,value=$t"
+            done
+            echo "type=raw,value=${{ steps.ref.outputs.version }}"
+            echo "type=sha,prefix=sha-"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
+        if: steps.gate.outputs.skip != 'true'
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.snipe_it }}
-            type=raw,value=${{ steps.version.outputs.snipe_it }}-${{ steps.version.outputs.date_tag }}
-            type=raw,value=${{ steps.version.outputs.major_minor }}
-            type=raw,value=${{ steps.version.outputs.major }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
-            type=sha,prefix=sha-
+          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
           labels: |
-            org.opencontainers.image.title=snipe-it
-            org.opencontainers.image.description=Hardened Snipe-IT ${{ steps.version.outputs.snipe_it }} on PHP 8.5 / Alpine
-            org.opencontainers.image.version=${{ steps.version.outputs.snipe_it }}
-            org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
+            org.opencontainers.image.title=snipe-it-php-fpm
+            org.opencontainers.image.description=Hardened Snipe-IT ${{ steps.ref.outputs.ref }} on PHP 8.5 / Alpine
+            org.opencontainers.image.version=${{ steps.ref.outputs.version }}
+            org.opencontainers.image.created=${{ steps.ref.outputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
 
       - name: Build (and push if not PR)
+        if: steps.gate.outputs.skip != 'true'
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           target: runtime
-          push: ${{ github.event_name != 'pull_request' && inputs.push != false }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            SNIPE_IT_VERSION=${{ steps.version.outputs.snipe_it }}
-            BUILD_DATE=${{ steps.version.outputs.build_date }}
+            SNIPE_IT_VERSION=${{ steps.ref.outputs.ref }}
+            BUILD_DATE=${{ steps.ref.outputs.build_date }}
             VCS_REF=${{ github.sha }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.track.name }}
+          cache-to: type=gha,scope=${{ matrix.track.name }},mode=max
 
       - name: Attest build provenance
-        if: github.event_name != 'pull_request' && inputs.push != false
+        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}

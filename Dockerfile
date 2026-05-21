@@ -49,7 +49,7 @@ RUN set -eux; \
 WORKDIR /build
 
 RUN set -eux; \
-    curl -fsSL "https://github.com/grokability/snipe-it/archive/refs/tags/${SNIPE_IT_VERSION}.tar.gz" \
+    curl -fsSL "https://codeload.github.com/grokability/snipe-it/tar.gz/${SNIPE_IT_VERSION}" \
         | tar xz --strip-components=1 \
     && test -f composer.json -a -f artisan
 
