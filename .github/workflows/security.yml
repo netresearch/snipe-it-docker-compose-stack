@@ -4,13 +4,16 @@
 # CVE scanning for the published snipe-it-php-fpm images.
 #
 # Runs:
-#   - Trivy container scan against :latest and :rolling (HIGH/CRITICAL → fail,
-#     SARIF uploaded to GitHub code-scanning)
+#   - Trivy container scan against :latest and :rolling — delegated to
+#     the reusable security-container.yml in netresearch/.github
+#     (HIGH/CRITICAL → SARIF, exit-code 0 = informational).
 #   - osv-scanner against the composer.lock baked into each image
-#     (CRITICAL → fail, lower severities informational)
+#     (informational; stays inline because composer.lock extraction is
+#     snipe-it-specific and not part of the container reusable surface).
 #
-# Scope is intentionally limited to vulnerability scanning. Scorecard, cosign
-# signing/verification, and SBOM attestation live in separate workflows.
+# Scope is intentionally limited to vulnerability scanning. Scorecard,
+# cosign signing/verification, and SBOM attestation live in separate
+# workflows.
 
 name: security
 
@@ -40,52 +43,32 @@ env:
 
 jobs:
   trivy:
-    name: trivy (${{ matrix.tag }})
     # On workflow_run, only run if the upstream build actually succeeded.
+    # `rolling` may not exist in ghcr.io (rolling builds can fail when
+    # upstream Snipe-IT's composer.json references a CVE-blocked major).
+    # The reusable's `tolerate-pull-failure` input handles the missing-
+    # image case via a pre-flight `docker manifest inspect` probe — when
+    # the manifest is unavailable, the Trivy + SARIF-upload steps are
+    # skipped and the job exits green. Job-level `continue-on-error:` is
+    # forbidden by GitHub on reusable-caller jobs, which is why this knob
+    # lives inside the reusable.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
-    # `:rolling` may not exist in ghcr.io (rolling builds fail when upstream
-    # Snipe-IT's composer.json references a CVE-blocked major). Don't let
-    # missing-image errors fail the whole security workflow.
-    continue-on-error: ${{ matrix.tag == 'rolling' }}
+    name: trivy (${{ matrix.tag }})
     permissions:
       contents: read
+      packages: read           # pull from ghcr.io (private/org-locked packages)
       security-events: write   # SARIF upload to GitHub code-scanning
     strategy:
       fail-fast: false
       matrix:
-        # `latest` = pinned-deps release line
-        # `rolling` = rolling-deps line (catches transitive CVEs)
+        # `latest`  = pinned-deps release line (canonical)
+        # `rolling` = rolling-deps line (catches transitive CVEs; may be absent)
         tag: [latest, rolling]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Trivy — vulnerability scan (HIGH/CRITICAL, SARIF, informational)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
-          format: sarif
-          output: trivy-${{ matrix.tag }}.sarif
-          severity: 'HIGH,CRITICAL'
-          # exit-code: 0 — informational. CVEs in transitive Snipe-IT deps
-          # (e.g. phpseclib, onelogin/php-saml, robrichards/xmlseclibs in
-          # v8.5.0's composer.lock) can't be fixed downstream; gating CI on
-          # them means CI is permanently red. Operators consume findings via
-          # GitHub Security tab + the daily-cron alert pattern.
-          exit-code: '0'
-          ignore-unfixed: 'true'
-          limit-severities-for-sarif: 'true'
-          vuln-type: 'os,library'
-
-      - name: Upload SARIF to code-scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@bc0b696b4103f5fe60f15749af68a046868d511a # codeql-bundle-v2.25.4
-        with:
-          sarif_file: trivy-${{ matrix.tag }}.sarif
-          category: trivy-${{ matrix.tag }}
+    uses: netresearch/.github/.github/workflows/security-container.yml@main
+    with:
+      image-ref: ghcr.io/${{ github.repository_owner }}/snipe-it-php-fpm:${{ matrix.tag }}
+      sarif-category: trivy-${{ matrix.tag }}
+      tolerate-pull-failure: ${{ matrix.tag == 'rolling' }}
 
   osv-scanner:
     # Same gate as trivy — only run on workflow_run if build succeeded.
