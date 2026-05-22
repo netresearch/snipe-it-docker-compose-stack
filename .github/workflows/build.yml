@@ -282,6 +282,14 @@ jobs:
             BUILD_DATE=${{ steps.ref.outputs.build_date }}
             VCS_REF=${{ github.sha }}
             ROLLING_DEPS=${{ matrix.composer == 'rolling' }}
+          # BuildKit secret. Picked up by the Dockerfile's composer install
+          # RUN via `--mount=type=secret,id=GH_TOKEN` and used to authenticate
+          # api.github.com fetches during dependency resolution. Without it,
+          # parallel matrix cells share the anonymous 60-req/h rate limit and
+          # randomly fail on "Could not authenticate against github.com".
+          # GITHUB_TOKEN is scoped to this job and expires when the job ends.
+          secrets: |
+            GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}

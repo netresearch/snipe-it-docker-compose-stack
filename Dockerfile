@@ -58,8 +58,27 @@ RUN set -eux; \
         | tar xz --strip-components=1 \
     && test -f composer.json -a -f artisan
 
+# BuildKit secret mount: caller (build.yml) passes the workflow's
+# GITHUB_TOKEN via `secrets: GH_TOKEN=${{ secrets.GITHUB_TOKEN }}`.
+# We set COMPOSER_AUTH from it before invoking composer so api.github.com
+# fetches go authenticated (5000 req/h instead of 60). Without this,
+# parallel matrix cells (especially the rolling ones, which re-resolve
+# every dep) collectively burn the anonymous rate limit and randomly
+# fail with "Could not authenticate against github.com" mid-install.
+# The secret file is only present during this RUN — it never lands in
+# any image layer.
 RUN --mount=type=cache,target=/root/.composer/cache \
+    --mount=type=secret,id=GH_TOKEN \
     set -eux; \
+    if [ -s /run/secrets/GH_TOKEN ]; then \
+        # Split declare + export so shellcheck SC2155 doesn't fire — \
+        # otherwise cat's exit code would be masked by export. \
+        GH_TOKEN=$(cat /run/secrets/GH_TOKEN); \
+        export COMPOSER_AUTH="{\"github-oauth\":{\"github.com\":\"${GH_TOKEN}\"}}"; \
+        echo "[composer] github.com authenticated via BuildKit secret"; \
+    else \
+        echo "[composer] no GH_TOKEN secret available — falling back to anonymous github.com (60 req/h)"; \
+    fi; \
     if [ "${ROLLING_DEPS}" = "true" ]; then \
         echo "[rolling-variant] deleting composer.lock to resolve fresh deps"; \
         rm -f composer.lock; \
