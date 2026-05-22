@@ -71,12 +71,18 @@ mkdir -p \
   /var/www/html/storage/framework/views \
   /var/www/html/storage/logs \
   /var/www/html/bootstrap/cache \
-  /var/lib/snipeit
+  /var/lib/snipeit \
+  /run/php-fpm
 
+# /run/php-fpm is also chown'd in case compose mounts a tmpfs here:
+# tmpfs masks the image-bake chown, so php-fpm (UID www-data) can't
+# create its socket without this. Standalone `docker run` of the image
+# falls back to the image-layer chown set in the Dockerfile.
 chown -R www-data:www-data \
   /var/www/html/storage \
   /var/www/html/bootstrap/cache \
-  /var/lib/snipeit 2>/dev/null || true
+  /var/lib/snipeit \
+  /run/php-fpm 2>/dev/null || true
 # Only chmod the directories we just (potentially) created via mkdir -p above —
 # a recursive chmod across the whole storage tree pegs CPU for seconds on large
 # instances on every container start. Pre-existing files keep their modes.

@@ -201,16 +201,24 @@ COPY rootfs/ /
 #      (`docker exec snipe-it cat /var/lib/snipeit/deps.txt`).
 #   2. Writable surfaces for the www-data process — storage, bootstrap
 #      cache, /var/lib/snipeit (user content), and /run/php-fpm (the
-#      socket directory). All are also re-chown'd by entrypoint.sh at
-#      container start to handle fresh named-volume mounts that mask
-#      the image-layer ownership.
+#      socket directory). All four are also re-chown'd by entrypoint.sh
+#      at container start, so the snipe-it process can write to them
+#      regardless of how the operator mounts volumes:
+#        - named volume → image-layer chown survives until first write
+#        - bind-mount → host UID/GID wins, entrypoint chown fixes it
+#        - tmpfs → mount masks image-layer chown, entrypoint fixes it
 #   3. Entrypoint executable bit.
 #
-# About /run/php-fpm: php-fpm binds its unix socket here. Compose mounts a
-# tmpfs at this path; this mkdir is the fallback for `docker run` of the
-# image standalone. NO TCP port is exposed — socket-only listening closes
-# a FastCGI bypass where any sibling container on the network could speak
-# FastCGI directly, bypassing nginx access control.
+# About /run/php-fpm: php-fpm binds its unix socket here. Compose mounts
+# a tmpfs at this path; this mkdir is the fallback for `docker run` of
+# the image standalone. The image inherits `EXPOSE 9000` from the
+# `php:8.5-fpm-alpine` base — that's only OCI metadata, and our
+# `php-fpm.d/zz-snipe-it.conf` sets `listen = /run/php-fpm/snipeit.sock`,
+# so nothing actually binds to TCP 9000. Socket-only listening closes a
+# FastCGI bypass: with TCP, any sibling container on the snipeit network
+# could speak FastCGI directly to php-fpm, bypassing nginx access
+# control. (Dockerfile has no `UNEXPOSE`; the inherited EXPOSE metadata
+# is moot when no process listens.)
 RUN set -eux; \
     mkdir -p /var/lib/snipeit /run/php-fpm \
     && cp /var/www/html/deps-manifest.txt /var/lib/snipeit/deps.txt \
