@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Netresearch DTT GmbH
 #
 # OpenSSF Scorecard — supply-chain security health check.
+# Delegates to the org-wide reusable in netresearch/.github.
 # Runs weekly against main and uploads SARIF to GitHub code-scanning.
 # Results also surface on the OpenSSF Scorecard public dashboard
 # (https://securityscorecards.dev/) once enabled.
@@ -17,16 +18,15 @@ on:
   workflow_dispatch:
 
 # Top-level permissions explicitly enumerated (SonarCloud rule
-# githubactions:S8234). The `analysis` job below requests its own
-# additional permissions; this minimum lets supporting tooling read
-# metadata without granting writes.
+# githubactions:S8234). The reusable's job requests its own
+# additional permissions via its own permissions block; this minimum
+# lets supporting tooling read metadata without granting writes.
 permissions:
   contents: read
 
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: ubuntu-latest
     permissions:
       # required by scorecard-action for publishing results
       security-events: write
@@ -35,29 +35,4 @@ jobs:
       contents: read
       # needed for nested API calls (Branch-Protection, Webhooks checks)
       actions: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Run analysis
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
-        with:
-          results_file: results.sarif
-          results_format: sarif
-          # publish_results: true uploads to the OpenSSF public dashboard.
-          # Required for the org-level Scorecard badge.
-          publish_results: true
-
-      - name: Upload artifact (raw results)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: SARIF file
-          path: results.sarif
-          retention-days: 5
-
-      - name: Upload to code-scanning
-        uses: github/codeql-action/upload-sarif@bc0b696b4103f5fe60f15749af68a046868d511a # codeql-bundle-v2.25.4
-        with:
-          sarif_file: results.sarif
+    uses: netresearch/.github/.github/workflows/scorecard.yml@main
