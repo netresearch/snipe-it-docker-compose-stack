@@ -184,16 +184,29 @@ Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secr
 
 The image ships `sentry/sentry-laravel` pre-installed. Set `SENTRY_LARAVEL_DSN` to your project DSN to start collecting errors — anything that format-matches `https://<key>@<host>/<project-id>` works. The default empty value keeps the SDK silent (no network calls). [Bugsink](https://www.bugsink.com/) is recommended for self-hosting since it speaks the Sentry wire protocol and avoids the SaaS data-egress concern for an internal asset-management tool.
 
-#### Self-hosted Bugsink as an overlay
+#### Two ways to wire it up
 
-To run Bugsink alongside Snipe-IT with no manual DSN copying, layer [`examples/compose.bugsink.yml`](examples/compose.bugsink.yml):
+| Goal | Command |
+|---|---|
+| Send errors to an **external** Sentry/Bugsink instance | `make enable-sentry DSN=https://<key>@<host>/<project-id>` |
+| Run a **self-hosted Bugsink** in-stack with auto-wired DSN | `make enable-bugsink` |
+| Stop external reporting | `make disable-sentry` |
+| Remove the in-stack Bugsink overlay | `make disable-bugsink` |
+| Show what's currently enabled | `make overlays` |
+
+Both targets mutate `.env` (the `enable-*` targets persist their state there). After enabling, `make up` brings the configured stack up — no manual `-f` chaining.
+
+##### Self-hosted Bugsink overlay
+
+`make enable-bugsink` adds [`examples/compose.bugsink.yml`](examples/compose.bugsink.yml) to `COMPOSE_FILE` in `.env`. Then:
 
 ```bash
-# 1. Fill the three required Bugsink vars in .env (SECRET_KEY, ADMIN_EMAIL, ADMIN_PASSWORD)
-docker compose -f compose.yml -f examples/compose.bugsink.yml up -d
+# Fill BUGSINK_SECRET_KEY (openssl rand -base64 50), BUGSINK_ADMIN_EMAIL,
+# BUGSINK_ADMIN_PASSWORD in .env (printed as a [next] hint by enable-bugsink), then:
+make up
 ```
 
-The overlay adds a SQLite-backed `bugsink` service (internal network only) and a one-shot `bugsink-init` container that seeds a `snipe-it` project in Bugsink and writes its DSN into a shared volume. The `app` and `worker` services pick the DSN up via `SENTRY_LARAVEL_DSN_FILE` — no `.env` editing needed beyond the Bugsink credentials. Re-runs are idempotent.
+The overlay adds a SQLite-backed `bugsink` service (internal network only) and a one-shot `bugsink-init` container that seeds a `snipe-it` project in Bugsink and writes its DSN into a shared volume. The `app` and `worker` services pick the DSN up via `SENTRY_LARAVEL_DSN_FILE` — no manual DSN copy step. Re-runs are idempotent.
 
 To reach the Bugsink UI, layer [`examples/compose.traefik.yml`](examples/compose.traefik.yml) or [`examples/compose.caddy.yml`](examples/compose.caddy.yml) and add a route to `bugsink:8000`.
 
