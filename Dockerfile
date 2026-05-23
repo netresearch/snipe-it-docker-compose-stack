@@ -69,14 +69,23 @@ RUN set -eux; \
 # any image layer.
 RUN --mount=type=cache,target=/root/.composer/cache \
     --mount=type=secret,id=GH_TOKEN \
-    set -eux; \
+    set -eu; \
     if [ -s /run/secrets/GH_TOKEN ]; then \
-        # Split declare + export so shellcheck SC2155 doesn't fire — \
-        # otherwise cat's exit code would be masked by export. \
+        # Token handling kept OUT of xtrace (set -x). `set +x` here is \
+        # belt-and-suspenders even though `set -eu` (no x) is the outer \
+        # default; once secret handling is done we re-enable xtrace for \
+        # the rest of the build. Without this, the export line would \
+        # be echoed with the token value expanded into the build log — \
+        # bot-reviewer-flagged on PR netresearch/snipe-it-docker-compose-stack#16 \
+        # (copilot + gemini, HIGH severity). \
+        set +x; \
         GH_TOKEN=$(cat /run/secrets/GH_TOKEN); \
         export COMPOSER_AUTH="{\"github-oauth\":{\"github.com\":\"${GH_TOKEN}\"}}"; \
+        unset GH_TOKEN; \
+        set -x; \
         echo "[composer] github.com authenticated via BuildKit secret"; \
     else \
+        set -x; \
         echo "[composer] no GH_TOKEN secret available — falling back to anonymous github.com (60 req/h)"; \
     fi; \
     if [ "${ROLLING_DEPS}" = "true" ]; then \

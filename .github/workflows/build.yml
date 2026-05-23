@@ -66,7 +66,14 @@ jobs:
       matrix:
         track:
           # ─ stable release line — reads .snipe-it-version (Renovate-managed) ─
-          - name: tag
+          # YAML anchor lets the matrix.exclude entry reference this exact
+          # object, so adding/changing a field here automatically keeps the
+          # exclude in sync. Without the anchor, the exclude block had to
+          # repeat all 3 properties verbatim and would silently stop
+          # excluding the intended cell if any of them drifted. Bot-reviewer-
+          # flagged on PR netresearch/snipe-it-docker-compose-stack#15.
+          - &tag-track
+            name: tag
             ref_source: file       # build.yml will read .snipe-it-version
             tags_extra: ''         # plus the auto-generated 8.5.0 / 8.5 / 8 / latest tags
           # ─ branch tracker: master (= last released code, may include
@@ -92,16 +99,16 @@ jobs:
           # PKSA-5r1g-c7b7-y1zg. No version satisfies the constraint, so
           # `composer install` exits 100. The only fix is upstream:
           # snipe-it must relax to `^5.0` (or bump the lock for the
-          # remediated 4.4.46+ once Symfony publishes it). Tracked at
-          # https://github.com/grokability/snipe-it/issues ; until then,
-          # the cell is excluded so CI is genuinely green. master/rolling
-          # and develop/rolling still exercise the rolling-deps path
-          # against their HEAD constraints, which is where any new
-          # transitive CVE would surface first.
-          - track:
-              name: tag
-              ref_source: file
-              tags_extra: ''
+          # remediated 4.4.46+ once Symfony publishes it).
+          # No specific upstream issue exists yet — filtered search:
+          # https://github.com/grokability/snipe-it/issues?q=is%3Aissue+symfony%2Fdom-crawler
+          # (related but distinct: closed #19054 was about composer
+          # dependencies after the 8.5 upgrade, not this advisory).
+          # Until then the cell is excluded so CI is genuinely green;
+          # master/rolling and develop/rolling still exercise the
+          # rolling-deps path against their HEAD constraints, which is
+          # where any new transitive CVE would surface first.
+          - track: *tag-track
             composer: rolling
     steps:
       - name: Filter — should this track run?
@@ -288,8 +295,18 @@ jobs:
           # parallel matrix cells share the anonymous 60-req/h rate limit and
           # randomly fail on "Could not authenticate against github.com".
           # GITHUB_TOKEN is scoped to this job and expires when the job ends.
+          #
+          # Empty on pull_request events: a hostile PR could otherwise modify
+          # the Dockerfile to exfiltrate the token via the secret mount.
+          # `pull_request` (not `pull_request_target`) does limit secrets to
+          # same-repo branches by default, but explicit gating closes the
+          # inside-attacker path too. Bot-reviewer-flagged on PR
+          # netresearch/snipe-it-docker-compose-stack#16.
+          # The Dockerfile's empty-token fallback (anonymous github.com,
+          # 60 req/h) is enough for PR-event smoke builds since they only
+          # build amd64 and don't fan a track×composer matrix.
           secrets: |
-            GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            GH_TOKEN=${{ github.event_name != 'pull_request' && secrets.GITHUB_TOKEN || '' }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}
