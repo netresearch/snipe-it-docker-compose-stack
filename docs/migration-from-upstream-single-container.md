@@ -3,255 +3,296 @@
 
 # Migration: from `snipe/snipe-it` single-container to this stack
 
-If you currently run Snipe-IT via the upstream single-container image
-(`snipe/snipe-it:vX.Y.Z-alpine`, which bundles Apache + PHP-FPM + cron in
-one image) and want to switch to this opinionated multi-container stack,
-this guide walks you through a downtime-bounded cutover with a rollback
-path.
+You're running Snipe-IT on the upstream `snipe/snipe-it:vX.Y.Z-alpine`
+image — Apache, PHP-FPM, and cron stuffed into one container — and you
+want to move to this opinionated multi-container stack without losing
+data and without an open-ended downtime window. This guide walks
+through that move the way an experienced operator would: snapshot what
+you have, prepare the new home on the side, then do a short cutover
+with a clean rollback path if anything looks wrong. Allow about 30
+minutes; the cutover itself runs in roughly 10, but a slow DB restore
+or reverse-proxy hiccup will eat the rest.
 
-## What changes architecturally
+## What's actually changing
+
+Upstream's container is one process tree doing everything: Apache
+fronting PHP-FPM, system cron firing Laravel's scheduler, file-system
+caches because there's nowhere else to put them. This stack splits
+those responsibilities across services that each do one thing.
 
 | Concern | Upstream single-container | This stack |
 |---------|---------------------------|------------|
 | Web server | Apache (in-container) | nginx (`web` service) |
-| PHP runtime | mod_php / fpm (in-container) | dedicated `app` service (`ghcr.io/netresearch/snipe-it-php-fpm`) |
+| PHP runtime | mod_php / fpm (in-container) | `app` service — `ghcr.io/netresearch/snipe-it-php-fpm` |
 | Scheduler / cron | system cron in-container | `scheduler` service (ofelia, Docker-native) |
-| Cache / sessions | filesystem default | `cache` service (Valkey) |
+| Cache / sessions | filesystem default | `valkey` service (RESP-compatible Redis fork) |
 | Database | external (you provide) | `db` service (MariaDB 11) — bring-your-own DB also supported |
 | Backups | external (you provide) | optional `backup` service (phpbu-docker) |
 | Image scope | everything | each container does one thing |
 
-The PHP-FPM image is multi-arch (linux/amd64 + linux/arm64), SLSA-attested,
-cosign-signed, rebuilt nightly against upstream Snipe-IT releases. The
-rest of the stack uses upstream-published images for the satellite
-services.
+The PHP-FPM image is multi-arch (`linux/amd64` + `linux/arm64`), ships
+with SLSA build provenance attestations, and rebuilds nightly so base-OS
+and Composer-dep CVE patches land without waiting for an upstream tag.
+The other services use upstream images.
 
-## Pre-flight
+## Before you start
 
-1. **Verify your current state**:
-   ```bash
-   docker compose -p <current-project-name> config | grep image:
-   docker volume ls
-   ```
-   Note the volume names that hold uploads + Laravel storage. Upstream's
-   image typically mounts them at `/var/lib/snipeit` and
-   `/var/www/html/storage`.
+Three things save a 2 AM call to a colleague.
 
-2. **Confirm your `.env` has** at minimum:
-   - `APP_KEY` (the base64-encoded key — this MUST survive the migration
-     or all encrypted-at-rest data is unreadable)
-   - `DB_PASSWORD` / `DB_HOST` / `DB_DATABASE`
-   - `MAIL_*` if email is configured
-   - any LDAP / SAML / SSO secrets
+**Find your `APP_KEY` and copy it somewhere safe.** Snipe-IT encrypts a
+handful of columns at rest — asset checkout history, LDAP bind
+passwords. A different `APP_KEY` on the new stack leaves those columns
+as silent garbage: UI renders fine, rows exist, but the content is
+unreadable. Copy the key, verify you can read it back, keep that copy
+until the new stack has been running a few days.
 
-3. **Pick a deployment directory** for the new stack. Convention varies
-   by organisation; common choices include `/srv/www/<service>`,
-   `/opt/<service>`, `/home/<deploy-user>/<service>`. Throughout this
-   guide we refer to the deploy directory as `$DEPLOY_DIR` — set it
-   once:
-   ```bash
-   export DEPLOY_DIR=/srv/www/snipeit-new      # adjust to taste
-   export BACKUP_DIR=/srv/backup/snipeit-migration
-   export LEGACY_DIR=/srv/www/snipeit           # where your current stack lives
-   mkdir -p "$BACKUP_DIR"
-   ```
+**Inventory your volumes.** On the old host, `docker volume ls` and
+`docker compose -p <current-project> config | grep image:` will tell
+you what's mounted. Upstream's image typically uses one volume at
+`/var/lib/snipeit` (uploads) and another at `/var/www/html/storage`
+(Laravel storage). Note the exact names; you'll feed them to the
+snapshot step.
 
-## Phase 1 — snapshot the current deployment
+**Plan the network topology.** If a reverse proxy currently targets the
+upstream container's Apache, the new backend will be this stack's `web`
+service on its `snipeit` Docker network. External proxies just need the
+new upstream address; in-Compose proxies need their network attached to
+`web` via `compose.override.yml`. Figure this out before downtime.
+
+A handful of shell variables make the rest readable:
+
+```bash
+export DEPLOY_DIR=/srv/www/snipeit-new       # where the new stack lives
+export BACKUP_DIR=/srv/backup/snipeit-migration
+export LEGACY_DIR=/srv/www/snipeit            # current upstream stack
+mkdir -p "$BACKUP_DIR"
+```
+
+## Take the snapshot while the lights are still on
+
+This runs against the running legacy stack — no downtime yet.
 
 ```bash
 cd "$LEGACY_DIR"
 
-# Database dump (adjust service name + credentials to match your old stack)
-docker compose exec db \
-  mysqldump --single-transaction -u root -p"$DB_ROOT_PASSWORD" snipeit \
-  > "$BACKUP_DIR/snipeit-pre-migration.sql"
+# Database dump. Use whatever env var the upstream container exposes
+# for the root password (commonly MYSQL_ROOT_PASSWORD); the single
+# quotes around the inner script keep the expansion inside the
+# container, where the variable actually exists.
+docker compose exec -T db sh -c '
+  mysqldump --single-transaction -uroot -p"$MYSQL_ROOT_PASSWORD" snipeit
+' > "$BACKUP_DIR/snipeit-pre-migration.sql"
 
-# Uploads + storage tarball.
-# Replace <UPLOADS_VOLUME> + <STORAGE_VOLUME> with the actual volume
-# names from `docker volume ls` — typical upstream pattern is one
-# `snipeit_data` or similar single volume.
-docker run --rm \
-  -v <UPLOADS_VOLUME>:/uploads \
-  -v "$BACKUP_DIR":/backup \
+# Uploads + Laravel storage. Replace <UPLOADS_VOLUME> and
+# <STORAGE_VOLUME> with the actual names from `docker volume ls`.
+docker run --rm -v <UPLOADS_VOLUME>:/uploads -v "$BACKUP_DIR":/backup \
   alpine tar czf /backup/uploads.tar.gz -C /uploads .
-
-docker run --rm \
-  -v <STORAGE_VOLUME>:/storage \
-  -v "$BACKUP_DIR":/backup \
+docker run --rm -v <STORAGE_VOLUME>:/storage -v "$BACKUP_DIR":/backup \
   alpine tar czf /backup/storage.tar.gz -C /storage .
 
-# .env snapshot — keep the APP_KEY and everything else
+# Keep the old .env — your APP_KEY source of truth and reference for
+# mail / LDAP / SAML.
 cp .env "$BACKUP_DIR/.env.pre-migration"
-
-# Sanity-check the snapshots
-ls -lah "$BACKUP_DIR"/
 ```
 
-The DB dump and tarballs should be non-empty. The `.env` snapshot is
-your reference for the next phase.
+`ls -lah "$BACKUP_DIR"/` should show three non-empty artefacts plus the
+env snapshot. If any of them looks suspiciously small, stop and
+investigate — you don't want to discover an empty dump on the other
+side of downtime.
 
-## Phase 2 — prepare the new stack
+## Stand up the new stack on the side
+
+Clone, fill in `.env`, leave it stopped until cutover:
 
 ```bash
 git clone https://github.com/netresearch/snipe-it-docker-compose-stack.git "$DEPLOY_DIR"
 cd "$DEPLOY_DIR"
-
 cp .env.example .env
 ```
 
-Edit `.env` so the critical fields match what the snapshot recorded:
+Edit `.env`. The values that matter:
 
-- `APP_KEY` — **must be the exact same value** as before, otherwise
-  encrypted columns (asset checkouts, LDAP passwords stored in DB) become
-  unreadable. Copy from `$BACKUP_DIR/.env.pre-migration`.
-- `DB_PASSWORD` and `DB_ROOT_PASSWORD` — pick fresh values here; the DB
-  service is new and gets initialised below. Don't reuse old passwords
-  unless you intentionally want them.
+- `APP_KEY` — paste the value you copied from the old `.env`. Same
+  string, no edits. Non-negotiable.
+- `DB_PASSWORD` and `DB_ROOT_PASSWORD` — pick fresh strong values. The
+  new `db` service gets initialised by the first `up`, so these are
+  creating credentials, not matching old ones.
 - `MAIL_*`, LDAP, SAML, OIDC, SSO — copy verbatim from the snapshot.
+- `APP_URL` — your public URL, no trailing slash.
 
-If you maintain operator-specific overrides (reverse-proxy labels,
-custom volume paths, extra services), put them in `compose.override.yml`
-(gitignored by default) so they survive `git pull` updates of the stack:
+Reverse-proxy labels and other site-specific tweaks go in
+`compose.override.yml` (gitignored, survives `git pull`):
 
 ```yaml
 # compose.override.yml — local-only overrides
 services:
   web:
     labels:
-      # Paste your existing reverse-proxy labels here. They applied to
-      # the upstream apache service; now they apply to the nginx
-      # `web` service which terminates HTTP for the stack.
+      # Your proxy labels go here. They previously applied to the
+      # upstream Apache container; now they apply to this stack's
+      # nginx `web` service.
       # Example for Traefik:
       # - "traefik.enable=true"
       # - "traefik.http.routers.snipeit.rule=Host(`assets.example.org`)"
 ```
 
-## Phase 3 — cutover
+Don't `docker compose up` yet — that happens during cutover, with the
+old stack already stopped, so you don't race two stacks against the
+same hostname.
 
-Downtime begins. Allow ~5–10 minutes for the DB restore plus first-boot
-migrations.
+## The cutover
+
+This is the short stretch where the dashboard is dark. Work straight
+through. Stop the old stack, bring DB + cache up first (so the restore
+has somewhere to land), replay the SQL dump, restore the file volumes,
+then bring the web tier up.
 
 ```bash
-# 1. Stop the old stack
+# Old stack down. Dashboard goes dark — this is downtime now.
 cd "$LEGACY_DIR"
 docker compose down
+```
 
-# 2. Bring up DB + cache first so the restore has somewhere to land
+Bring up only DB and cache from the new stack and wait for MariaDB:
+
+```bash
 cd "$DEPLOY_DIR"
-docker compose up -d db cache
-docker compose exec db sh -c 'until mysqladmin ping -u root -p"$DB_ROOT_PASSWORD" --silent; do sleep 1; done'
+docker compose up -d db valkey
 
-# 3. Restore the database
-docker compose exec -T db \
-  mysql -u root -p"$DB_ROOT_PASSWORD" snipeit \
-  < "$BACKUP_DIR/snipeit-pre-migration.sql"
+# The root password lives inside the container as
+# MARIADB_ROOT_PASSWORD (compose.yml populates it from .env's
+# DB_ROOT_PASSWORD). Single quotes keep the variable expansion inside
+# the container.
+docker compose exec -T db sh -c '
+  until mariadb-admin ping -uroot -p"$MARIADB_ROOT_PASSWORD" --silent; do
+    sleep 1
+  done
+'
+```
 
-# 4. Restore uploads + storage into the new volumes
-# Volume names follow Docker Compose convention: <project>_<volume>
-PROJECT="$(basename "$DEPLOY_DIR")"
+Once the ping loop exits, restore the dump — same trick, password
+expanded inside the container:
 
-docker run --rm \
-  -v "${PROJECT}_app-data:/data" \
-  -v "$BACKUP_DIR":/backup \
+```bash
+docker compose exec -T db sh -c '
+  mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" snipeit
+' < "$BACKUP_DIR/snipeit-pre-migration.sql"
+```
+
+Now restore the file volumes. This stack pins explicit volume names in
+`compose.yml` (`name: snipeit-app-data`, `name: snipeit-app-storage`,
+etc.), so the names below are exactly the literal names Docker
+created — no project-name prefix, no dependency on what you called
+`$DEPLOY_DIR`.
+
+```bash
+docker run --rm -v snipeit-app-data:/data -v "$BACKUP_DIR":/backup \
   alpine tar xzf /backup/uploads.tar.gz -C /data
-
-docker run --rm \
-  -v "${PROJECT}_app-storage:/storage" \
-  -v "$BACKUP_DIR":/backup \
+docker run --rm -v snipeit-app-storage:/storage -v "$BACKUP_DIR":/backup \
   alpine tar xzf /backup/storage.tar.gz -C /storage
+```
 
-# 5. Bring up the rest
+> **Heads-up:** the literal names work because this stack's
+> `compose.yml` explicitly pins them. If you wrote your own
+> `compose.yml` without the `name:` keys, default Compose naming
+> applies (`<project>_<volume>`) and these literal names won't match.
+> `docker volume ls` right after `up -d db valkey` is the fastest way
+> to confirm what Docker actually created.
+
+Bring everything else up and wait for healthchecks:
+
+```bash
 docker compose up -d --wait
 ```
 
-## Phase 4 — validate
+`--wait` blocks until every service with a healthcheck reports healthy.
+If it returns non-zero, jump to the troubleshooting section below.
+
+## How you know it worked
+
+Test the canary first. Open the UI, log in, click into an asset with a
+checkout history, and confirm the "checked out to" entries render
+readable user names — **not corrupted bytes.** That's the test that
+matters: if it fails, the `APP_KEY` did not transfer correctly. Stop
+and roll back.
+
+If checkouts read clean, walk through the rest:
 
 ```bash
-# All services healthy
-docker compose ps
+docker compose ps                                # every service healthy
+curl -fsS -I http://localhost:8000/ | head -5    # HTTP reachable
 
-# HTTP reachable (adjust host/port for your reverse-proxy or direct port mapping)
-curl -fsS -I http://localhost:8000/ | head -5
-
-# Database connectivity from the app container
+# Smoke-check counts
 docker compose exec app php artisan tinker --execute='echo "Users: " . \App\Models\User::count() . PHP_EOL;'
 docker compose exec app php artisan tinker --execute='echo "Assets: " . \App\Models\Asset::count() . PHP_EOL;'
 
-# Scheduler is running (ofelia replaces cron)
+# Scheduler alive and talking to Docker
 docker compose logs scheduler --tail=20
-
-# At least one full request flowed through the stack: log in via the UI,
-# load a few asset detail pages, run one report. Encrypted columns
-# (asset checkout history, LDAP-bound passwords) should be readable —
-# if they aren't, the APP_KEY did not transfer correctly. See Rollback.
 ```
 
-## Rollback
+The scheduler log should show `successfully connected to docker
+socket` and, within a minute, the first `snipeit-schedule` and
+`snipeit-heartbeat` job executions. Run one report from the UI for
+good measure, then watch `docker compose logs -f app` for a couple of
+minutes — no stack traces, no decryption warnings, no 500s.
 
-The new stack hasn't written outside its own volumes during the cutover.
-If validation fails, the old stack can come back up immediately:
+## If something goes wrong
+
+The new stack only writes to its own volumes during cutover, so
+rollback is fast:
 
 ```bash
 cd "$DEPLOY_DIR" && docker compose down
 cd "$LEGACY_DIR" && docker compose up -d
 ```
 
-The DB snapshot in `$BACKUP_DIR/snipeit-pre-migration.sql` is your
-worst-case restore point against the legacy DB if something has been
-written to it in error.
+The snapshot in `$BACKUP_DIR` is your worst-case insurance.
 
-## Post-validation cleanup
+**Encrypted columns look corrupted.** UI loads, lists render, but
+checkout-to fields and LDAP-derived data look like garbage or trigger
+"decryption failed" in `storage/logs/laravel.log`. Almost always an
+`APP_KEY` mistyped or pasted with trailing whitespace. Fix `APP_KEY` in
+`.env`, `docker compose restart app`, recheck. If the key really did
+transfer correctly and it still fails, roll back.
 
-After 1–2 days of stable operation:
+**Reverse proxy returns 502.** The proxy is reaching something but not
+the right thing — usually still targeting the old service name or
+network. Update the proxy's upstream to the new `web` service, or
+attach `web` to whichever Docker network your proxy uses. The stack's
+own network is named `snipeit`.
+
+**Scheduler logs say permission denied on the docker socket.** Ofelia
+needs the host's `/var/run/docker.sock` to `docker exec`
+`schedule:run` into `app`. Check the `scheduler` service's volume mount
+against the actual socket path on your host. Most distributions work
+unchanged; rootless Docker setups expose the socket elsewhere.
+
+## After the dust settles
+
+Give the new stack a day or two of normal traffic. Let one nightly
+`phpbu` run finish (default 03:00) so you've proven the backup loop
+end-to-end. Then archive the legacy directory rather than deleting:
 
 ```bash
-# Archive the legacy stack directory (don't delete yet — keep for one
-# more week as a belt-and-suspenders rollback)
 mv "$LEGACY_DIR" "${LEGACY_DIR}.archive-$(date +%Y%m%d)"
-
-# Rename the new deployment to the canonical name if you used a -new suffix
-# (skip if your DEPLOY_DIR already has the final name)
+# If your new deploy dir has a temporary suffix:
 # mv "$DEPLOY_DIR" "$LEGACY_DIR"
-```
-
-The legacy upstream image can be removed from your local Docker store:
-
-```bash
 docker image rm snipe/snipe-it:vX.Y.Z-alpine
 ```
 
-The `$BACKUP_DIR` snapshots are worth keeping for ~30 days, then
-prune.
+Keep the migration snapshots in `$BACKUP_DIR` for ~30 days. After that,
+the stack's nightly `phpbu` artefacts cover you.
 
-## Common pitfalls
+## Staying current
 
-- **APP_KEY mismatch** — symptoms are silent: the UI loads, but
-  asset-checkout history columns show as `���` or "decryption failed"
-  warnings in `storage/logs/laravel.log`. Stop, restore APP_KEY from the
-  snapshot, restart the `app` container.
-- **Wrong volume name in step 4** — Compose prepends the project name
-  (the directory basename by default). If you used `-p some-project` in
-  the compose call, that's the prefix. `docker volume ls` after step 2
-  reveals the actual names.
-- **Reverse-proxy 502s after cutover** — verify the `web` service is in
-  the same Docker network the proxy expects. Upstream's image listened
-  on port 80 directly; this stack's `web` (nginx) does the same, but if
-  your proxy was previously targeting an `app:80` container, update the
-  target to `web:80`.
-- **Scheduler doesn't run** — ofelia reads labels from the `app`
-  service. `docker compose logs scheduler` should show
-  `successfully connected to docker socket`. If it says permission
-  denied, the host's `/var/run/docker.sock` isn't being passed through —
-  check `compose.yml`'s `scheduler` service volume mount.
+Subscribe to releases on
+[netresearch/snipe-it-docker-compose-stack](https://github.com/netresearch/snipe-it-docker-compose-stack/releases)
+so notable changes reach you. For routine updates, `make upgrade` pulls
+the latest images and recreates containers; the `app` entrypoint runs
+`php artisan migrate --force` on every start, so schema bumps are
+automatic.
 
-## When to revisit this guide
-
-- Snipe-IT releases that bump `composer.json` constraints past
-  currently CVE-blocked transitive deps may let you remove
-  `matrix.exclude` from `.github/workflows/build.yml` (the `tag/rolling`
-  cell). Currently excluded because `symfony/dom-crawler ^4.4`'s entire
-  range carries advisory PKSA-5r1g-c7b7-y1zg.
-- If/when the netresearch/.github reusable workflows adopt versioned
-  refs (`@v1` instead of `@main`), this stack's caller workflows will
-  switch — that's a stack-side change, not a migration concern, but
-  watch the changelog.
+For day-2 troubleshooting, [`runbook-day2-ops.md`](runbook-day2-ops.md)
+catalogues the failure modes we've seen in production; for worst-case
+disaster recovery from `phpbu` artefacts, [`runbook-restore.md`](runbook-restore.md)
+is the canonical procedure.
