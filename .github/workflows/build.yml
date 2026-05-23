@@ -296,17 +296,18 @@ jobs:
           # randomly fail on "Could not authenticate against github.com".
           # GITHUB_TOKEN is scoped to this job and expires when the job ends.
           #
-          # Empty on pull_request events: a hostile PR could otherwise modify
-          # the Dockerfile to exfiltrate the token via the secret mount.
-          # `pull_request` (not `pull_request_target`) does limit secrets to
-          # same-repo branches by default, but explicit gating closes the
-          # inside-attacker path too. Bot-reviewer-flagged on PR
-          # netresearch/snipe-it-docker-compose-stack#16.
-          # The Dockerfile's empty-token fallback (anonymous github.com,
-          # 60 req/h) is enough for PR-event smoke builds since they only
-          # build amd64 and don't fan a track×composer matrix.
+          # Withheld on pull_request events FROM FORKS: a hostile fork PR
+          # could otherwise modify the Dockerfile to exfiltrate the token
+          # via the secret mount. Same-repo PRs still get the token —
+          # those contributors are trusted (commit / push access already
+          # granted), and the anonymous 60-req/h cap no longer covers
+          # `composer require` dep-resolution added in PR #21 (it failed
+          # AuthHelper after exhausting the anonymous budget). For forks,
+          # CI falls back to anonymous and may flake on rate-limit; the
+          # Dockerfile's retry loop absorbs transient blips. Originally
+          # flagged on PR netresearch/snipe-it-docker-compose-stack#16.
           secrets: |
-            GH_TOKEN=${{ github.event_name != 'pull_request' && secrets.GITHUB_TOKEN || '' }}
+            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}

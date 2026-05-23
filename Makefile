@@ -40,6 +40,37 @@ ps: ## Show container status
 	docker compose ps
 
 # ────────────────────────────────────────────────────────────────────
+# Overlays & integrations
+# ────────────────────────────────────────────────────────────────────
+#
+# Overlay state lives in .env as COMPOSE_FILE=<colon-separated paths>.
+# docker compose reads this automatically, so `make up` works without
+# manual `-f` chaining once an overlay is enabled.
+
+overlays: .env ## Show currently-enabled compose overlays
+	@./bin/compose-file.sh list
+
+enable-bugsink: .env ## Add self-hosted Bugsink overlay (in-stack error tracking, auto-DSN)
+	@./bin/compose-file.sh add examples/compose.bugsink.yml
+	@if grep -qE '^SENTRY_LARAVEL_DSN=.+$$' .env; then \
+	  printf '\033[1;33m[warn]\033[0m SENTRY_LARAVEL_DSN is set — the bugsink-init container will override it with the in-stack DSN.\n'; \
+	fi
+	@printf '\033[1;34m[next]\033[0m Fill BUGSINK_SECRET_KEY (openssl rand -base64 50), BUGSINK_ADMIN_EMAIL, BUGSINK_ADMIN_PASSWORD in .env, then `make up`.\n'
+
+disable-bugsink: .env ## Remove Bugsink overlay (BUGSINK_* env vars stay in .env)
+	@./bin/compose-file.sh remove examples/compose.bugsink.yml
+
+enable-sentry: .env ## Point error tracking at an external Sentry/Bugsink DSN. Usage: make enable-sentry DSN=https://...
+	@test -n "$(DSN)" || { printf '\033[1;31m[err]\033[0m Usage: make enable-sentry DSN=https://...\n' >&2; exit 1; }
+	@if ./bin/compose-file.sh list | grep -q '^examples/compose.bugsink.yml$$'; then \
+	  printf '\033[1;33m[warn]\033[0m bugsink overlay is enabled — its init container auto-seeds the DSN; this manual DSN will be ignored.\n'; \
+	fi
+	@./bin/env-set.sh SENTRY_LARAVEL_DSN "$(DSN)"
+
+disable-sentry: .env ## Clear SENTRY_LARAVEL_DSN (turns external error reporting off)
+	@./bin/env-set.sh SENTRY_LARAVEL_DSN ""
+
+# ────────────────────────────────────────────────────────────────────
 # Backup / restore
 # ────────────────────────────────────────────────────────────────────
 
@@ -157,4 +188,4 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 	  [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	docker compose down -v
 
-.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit dev build lint pull upgrade shell artisan tinker restore clean
+.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit dev build lint pull upgrade shell artisan tinker restore clean overlays enable-bugsink disable-bugsink enable-sentry disable-sentry

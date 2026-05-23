@@ -34,6 +34,12 @@ ARG SNIPE_IT_VERSION=v8.5.0
 # Default: false — produces deterministic, audit-friendly pinned images.
 ARG ROLLING_DEPS=false
 
+# Sentry-Laravel pin. Bumped deliberately to keep pinned image variants
+# bit-for-bit reproducible across rebuilds (a bare `^4` would resolve
+# whichever 4.x is current at build time, defeating the "pinned" promise).
+# Rolling-variant builds also use this version unless overridden.
+ARG SENTRY_LARAVEL_VERSION=4.25.1
+
 ENV COMPOSER_ALLOW_SUPERUSER=1 \
     COMPOSER_NO_INTERACTION=1 \
     COMPOSER_MEMORY_LIMIT=-1
@@ -84,11 +90,38 @@ RUN --mount=type=cache,target=/root/.composer/cache \
     else \
         echo "[composer] no GH_TOKEN secret available — falling back to anonymous github.com (60 req/h)"; \
     fi; \
-    if [ "${ROLLING_DEPS}" = "true" ]; then \
+    # Add sentry/sentry-laravel to the Snipe-IT composer.json. Done BEFORE \
+    # the rolling-lock-delete and BEFORE composer install so the package \
+    # lands in both pinned and rolling builds. \
+    # --no-install: don't install yet (composer install below does that). \
+    # --no-scripts / --no-interaction: keep the build deterministic. \
+    # SDK auto-discovery registers the ServiceProvider; activation is \
+    # controlled at runtime by SENTRY_LARAVEL_DSN — empty = silently \
+    # disabled, set = enabled. Compatible with Bugsink (self-hosted, \
+    # Sentry-protocol-compatible) using the same DSN format. \
+    # \
+    # Retry loop: PR-event builds run anonymously against github.com \
+    # (60 req/h cap, see .github/workflows/build.yml's secrets block) \
+    # and dep resolution is fan-out-y. Five attempts with linear backoff \
+    # absorb the occasional transient 401/rate-limit blip without \
+    # masking a real failure. \
+    n=0; \
+    until composer require --no-install --no-scripts --no-interaction \
+            "sentry/sentry-laravel:${SENTRY_LARAVEL_VERSION}"; do \
+        n=$((n + 1)); \
+        if [ "$n" -ge 5 ]; then \
+            echo "[composer] require sentry/sentry-laravel failed after $n attempts" >&2; \
+            exit 1; \
+        fi; \
+        sleep_s=$((n * 10)); \
+        echo "[composer] require attempt $n failed, retrying in ${sleep_s}s"; \
+        sleep "$sleep_s"; \
+    done \
+    && if [ "${ROLLING_DEPS}" = "true" ]; then \
         echo "[rolling-variant] deleting composer.lock to resolve fresh deps"; \
         rm -f composer.lock; \
-    fi; \
-    composer install \
+    fi \
+    && composer install \
         --no-dev \
         --no-progress \
         --no-scripts \
@@ -173,6 +206,12 @@ LABEL org.opencontainers.image.title="snipe-it-php-fpm" \
       org.opencontainers.image.version="${SNIPE_IT_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}"
+
+# Sentry: bake SENTRY_RELEASE into the runtime so error reports auto-tag
+# which Snipe-IT version this image represents. Bugsink/Sentry use it to
+# pinpoint regressions to a specific release. Operators can override per
+# deployment via the env var if they ship their own image variants.
+ENV SENTRY_RELEASE=snipe-it@${SNIPE_IT_VERSION}
 
 RUN set -eux; \
     apk add --no-cache \

@@ -176,8 +176,54 @@ Operational toggles:
 | `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_CONNECTION` | `redis` | Laravel driver name (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
 | `SKIP_MIGRATIONS` | `false` | Skip `php artisan migrate --force` at container start |
 | `TZ` | `UTC` | IANA timezone |
+| `SENTRY_LARAVEL_DSN` | _(empty)_ | Error tracking DSN — empty disables; works with [Bugsink](https://www.bugsink.com/) (self-hosted) or [Sentry SaaS](https://sentry.io/) |
 
 Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secrets/db_password`).
+
+### Error tracking (Sentry / Bugsink)
+
+The image ships `sentry/sentry-laravel` pre-installed. Set `SENTRY_LARAVEL_DSN` to your project DSN to start collecting errors — anything that format-matches `http(s)://<key>@<host>/<project-id>` works (use `http://` for the in-stack Bugsink overlay, `https://` for external/TLS-terminated instances). The default empty value keeps the SDK silent (no network calls). [Bugsink](https://www.bugsink.com/) is recommended for self-hosting since it speaks the Sentry wire protocol and avoids the SaaS data-egress concern for an internal asset-management tool.
+
+#### Two ways to wire it up
+
+| Goal | Command |
+|---|---|
+| Send errors to an **external** Sentry/Bugsink instance | `make enable-sentry DSN=https://<key>@<host>/<project-id>` |
+| Run a **self-hosted Bugsink** in-stack with auto-wired DSN | `make enable-bugsink` |
+| Stop external reporting | `make disable-sentry` |
+| Remove the in-stack Bugsink overlay | `make disable-bugsink` |
+| Show what's currently enabled | `make overlays` |
+
+Both targets mutate `.env` (the `enable-*` targets persist their state there). After enabling, `make up` brings the configured stack up — no manual `-f` chaining.
+
+##### Self-hosted Bugsink overlay
+
+`make enable-bugsink` adds [`examples/compose.bugsink.yml`](examples/compose.bugsink.yml) to `COMPOSE_FILE` in `.env`. Then:
+
+```bash
+# Fill BUGSINK_SECRET_KEY (openssl rand -base64 50), BUGSINK_ADMIN_EMAIL,
+# BUGSINK_ADMIN_PASSWORD in .env (printed as a [next] hint by enable-bugsink), then:
+make up
+```
+
+The overlay adds a SQLite-backed `bugsink` service (internal network only) and a one-shot `bugsink-init` container that seeds a `snipe-it` project in Bugsink and writes its DSN into a tmpfs-backed shared volume. The `app` and `worker` services pick the DSN up via `SENTRY_LARAVEL_DSN_FILE` — no manual DSN copy step. Re-runs are idempotent.
+
+Error-tracking traffic between Snipe-IT and Bugsink flows over plaintext `http://bugsink:8000` on the internal compose bridge — fine within a single host, no encryption-at-rest concern beyond what the rest of the stack already has.
+
+To reach the Bugsink UI, layer [`examples/compose.traefik.yml`](examples/compose.traefik.yml) or [`examples/compose.caddy.yml`](examples/compose.caddy.yml) and add a route to `bugsink:8000`. When proxied with TLS, set `BUGSINK_PUBLIC_URL=https://bugsink.example.com` and `BUGSINK_BEHIND_HTTPS_PROXY=true` in `.env`. The `BEHIND_HTTPS_PROXY` flag tells Django to trust `X-Forwarded-*` headers — only enable it when the fronting proxy STRIPS client-supplied `X-Forwarded-*` headers (Traefik does this by default; Caddy needs `trusted_proxies` configured).
+
+##### Password lifecycle
+
+`BUGSINK_ADMIN_PASSWORD` in `.env` is the bootstrap password used by Bugsink's `CREATE_SUPERUSER` env var on first boot. Rotate it via the Bugsink UI after first login (Settings → My account → Change password), then clear the bootstrap value from `.env` so the plaintext doesn't linger on disk:
+
+```bash
+./bin/env-set.sh BUGSINK_ADMIN_PASSWORD ""
+docker compose up -d bugsink   # idempotent — no-op since the superuser already exists
+```
+
+##### Disk usage
+
+Bugsink stores events on the `bugsink-data` volume. Configure event retention per-project in the Bugsink UI (Settings → Projects → Retention) to bound disk usage on long-running deployments.
 
 ## Security posture
 
