@@ -8,10 +8,16 @@
 #   - Read Docker secrets via *_FILE env vars and export the value
 #   - Verify required env vars are set
 #   - Ensure storage / cache directories are writable (volumes may have new uids)
+#   - Bootstrap Passport OAuth keys if missing (first-boot / nuked volume)
 #   - Wait for the DB to be reachable
-#   - Apply migrations (opt-out via SKIP_MIGRATIONS=true)
-#   - Cache Laravel config + routes
+#   - Apply migrations under maintenance mode (opt-out via SKIP_MIGRATIONS=true)
+#   - Clear stale Laravel cache, then re-cache config + routes
 #   - exec CMD (php-fpm)
+#
+# Mirrors the artisan call sequence from upstream's upgrade.php
+# (https://github.com/grokability/snipe-it/blob/master/upgrade.php) so that
+# entrypoint-driven schema upgrades behave like the documented upstream
+# upgrade flow.
 #
 # Hard-fail loudly if any precondition is missing — silent half-starts are
 # worse than crash loops.
@@ -98,6 +104,27 @@ chmod 0775 \
   /var/lib/snipeit 2>/dev/null || true
 
 # ---------------------------------------------------------------------
+# 3b. Passport / OAuth key bootstrap
+# ---------------------------------------------------------------------
+# Snipe-IT uses Laravel Passport for OAuth. The asymmetric keypair lives at
+# storage/oauth-{private,public}.key. If either is missing — fresh install,
+# or storage volume was nuked — the UI works but every /oauth/* request 500s
+# silently (catastrophic for API consumers). Generate the pair before
+# php-fpm starts so OAuth is functional from the very first request.
+#
+# `passport:keys --force` is a file-only operation (no DB), so we run it
+# here, before the DB wait. The `[ ! -f X ] || [ ! -f Y ]` guard is
+# load-bearing: --force would overwrite an existing keypair and revoke all
+# outstanding access tokens.
+if [ ! -f /var/www/html/storage/oauth-private.key ] || \
+   [ ! -f /var/www/html/storage/oauth-public.key ]; then
+  log "OAuth/Passport keys missing — generating via artisan passport:keys"
+  su-exec www-data php artisan passport:keys --force --no-interaction
+else
+  log "OAuth/Passport keys present"
+fi
+
+# ---------------------------------------------------------------------
 # 4. Wait for DB (skip if SKIP_DB_WAIT=true)
 # ---------------------------------------------------------------------
 DB_WAIT_TIMEOUT="${DB_WAIT_TIMEOUT:-60}"
@@ -136,19 +163,51 @@ if [ "${SKIP_DB_WAIT:-false}" != "true" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# 5. Migrations
+# 5. Migrations — wrapped in maintenance mode (mirrors upstream upgrade.php)
 # ---------------------------------------------------------------------
+# Upstream runs `php artisan down` before migrate and `php artisan up` after,
+# so users hitting the app mid-migration see Laravel's maintenance page
+# instead of partial-state 500s. We do the same.
+#
+# `down` and `up` are made resilient: failures are logged but never abort
+# the entrypoint, so a stale "down" file from a previous crash doesn't
+# wedge the container in maintenance mode forever. The MIGRATE result is
+# captured separately and re-raised AFTER `up` runs — that's the load-
+# bearing invariant. We never want to leave the app in maintenance mode
+# just because migrations failed.
 cd /var/www/html
 if [ "$SKIP_MIGRATIONS" = "true" ]; then
-  log "SKIP_MIGRATIONS=true — skipping artisan migrate"
+  log "SKIP_MIGRATIONS=true — skipping artisan down/migrate/up"
 else
+  log "entering maintenance mode (php artisan down)"
+  su-exec www-data php artisan down --no-interaction \
+    || log "WARNING: artisan down failed — continuing with migrate"
+
+  migrate_rc=0
   log "running php artisan migrate --force"
-  su-exec www-data php artisan migrate --force --no-interaction
+  su-exec www-data php artisan migrate --force --no-interaction || migrate_rc=$?
+
+  log "leaving maintenance mode (php artisan up)"
+  su-exec www-data php artisan up --no-interaction \
+    || log "WARNING: artisan up failed — container may still be in maintenance mode"
+
+  if [ "$migrate_rc" -ne 0 ]; then
+    log "ERROR: artisan migrate failed with exit $migrate_rc — aborting"
+    exit "$migrate_rc"
+  fi
 fi
 
 # ---------------------------------------------------------------------
-# 6. Cache config + routes (production optimisation)
+# 6. Clear stale caches, then re-cache config + routes
 # ---------------------------------------------------------------------
+# Upstream's post-upgrade sequence clears config / cache / route / view
+# before re-caching. config:cache implicitly clears the cached config
+# (it overwrites bootstrap/cache/config.php), but it does NOT clear
+# Laravel's general application cache — that's what `cache:clear` does.
+# Stale cached settings rows can survive image-version bumps without it.
+log "clearing stale application cache"
+su-exec www-data php artisan cache:clear 2>/dev/null || true
+
 log "caching config, routes, events"
 su-exec www-data php artisan config:cache
 su-exec www-data php artisan route:cache 2>/dev/null || true
