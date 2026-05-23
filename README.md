@@ -110,14 +110,14 @@ The php-fpm image (`ghcr.io/netresearch/snipe-it-php-fpm`) is intentionally narr
 | **Init** | `tini` as PID 1 → entrypoint → php-fpm |
 | **Healthcheck** | `cgi-fcgi` ping on `/run/php-fpm/snipeit.sock` |
 | **Multi-arch** | linux/amd64, linux/arm64 |
-| **Supply chain** | SLSA build provenance + SBOM (cosign signing post-MVP) |
+| **Supply chain** | SLSA build provenance (in-toto via `attest-build-provenance`) + SBOM + keyless cosign signature (OIDC, Rekor-logged) on every push / scheduled build |
 | **License** | AGPL-3.0-or-later (matches Snipe-IT upstream) |
 
 ## Why does this exist?
 
 The official `snipe/snipe-it` image is fine but conservative:
 - ships PHP 8.3 (Ubuntu) or 8.4 (Alpine) — not the upstream-recommended 8.5
-- the Alpine variant has [no built-in scheduler](https://github.com/grokability/snipe-it/issues), so Laravel's scheduled tasks (audit reminders, expected-checkin alerts, license expiry warnings) silently don't run
+- the Alpine variant has no built-in scheduler, so Laravel's scheduled tasks (audit reminders, expected-checkin alerts, license expiry warnings) silently don't run
 - new versions ship every 3-6 months — base-OS CVEs accrue between releases
 
 This stack fixes all three:
@@ -141,13 +141,14 @@ make logs-app                          # Ctrl-C stops the tail (does NOT stop th
 # Then open:  http://localhost:8000
 ```
 
-For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make init` and run `make restart`. The reverse-proxy overlay at [`examples/compose.traefik.yml`](examples/compose.traefik.yml) handles TLS termination.
+For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make init` and run `make down && make up` to re-read env across all services (`make restart` only restarts `app` + `web`, so `worker` would keep emitting stale URLs in queued emails). The reverse-proxy overlay at [`examples/compose.traefik.yml`](examples/compose.traefik.yml) handles TLS termination.
 
 ## Common operations
 
 | Goal | Command |
 |---|---|
-| Start / stop / restart | `make up` / `make down` / `make restart` |
+| Start / stop the stack | `make up` / `make down` |
+| Restart `app` + `web` only (no env re-read) | `make restart` |
 | Tail logs | `make logs-app` (one service) or `make logs` (all) |
 | Aggregated health (wire into monitoring) | `make health` |
 | One-shot artisan command | `make artisan CMD="route:list"` |
@@ -197,7 +198,8 @@ Built daily, multi-arch (`linux/amd64` + `linux/arm64`), in two variants. Pinned
 | `8.5.0-YYYYMMDD` | pinned | Reproducible dated build — audit-friendly |
 | `8.5` / `8` | pinned | Auto-rolls on patch / minor bump |
 | `master` / `develop` / `nightly` | pinned | Upstream branch HEAD |
-| `<tag>-rolling` | rolling | Same source ref, `composer.lock` deleted before `install` |
+| `master-rolling` / `develop-rolling` / `nightly-rolling` | rolling | Upstream branch HEAD with `composer.lock` deleted |
+| `<tag>-rolling` | rolling | Same source ref as pinned, `composer.lock` deleted before `install` |
 | `sha-pinned-<sha>` / `sha-rolling-<sha>` | both | Per-stack-commit build |
 
 **Pick pinned for production** — reproducible, manifest-equivalent rebuilds (modulo base-image patches). **Pick rolling** if you'd rather catch transitive-dep CVEs early than match upstream's tested dependency graph.
@@ -249,14 +251,15 @@ When fronting Bugsink with TLS, set `BUGSINK_PUBLIC_URL=https://bugsink.example.
 ## Security posture
 
 - **Non-root execution** — `www-data` runs php-fpm and queue:work; entrypoint drops privileges with `su-exec` after repairing volume permissions
-- **No new privileges** — `security_opt: no-new-privileges:true` on every service
-- **Capability drop** — `cap_drop: ALL` on `app`, `web`, and `worker` with minimal re-adds (see [`compose.yml`](compose.yml) for the per-service list)
+- **No new privileges** — `security_opt: no-new-privileges:true` on every long-running service (db/valkey/app/web/worker/scheduler/backup, plus the bugsink overlay)
+- **Capability drop** — `cap_drop: ALL` on `app`, `web`, and `worker` with minimal re-adds (see [`compose.yml`](compose.yml) for the per-service list); db/valkey/scheduler/backup keep default caps the upstream images expect
+- **Overlay parity** — opt-in overlays in [`examples/`](examples/) (Bugsink, Traefik, Caddy, observability) ship with the same `no-new-privileges` + `cap_drop: ALL` posture on every long-running service they add
 - **Read-only mounts** — nginx reads `app-public` and `app-storage` read-only
 - **tmpfs** — `/tmp`, `/var/cache/nginx`, `/var/run` are tmpfs on `web`; `bootstrap/cache` is tmpfs on `app` (prevents attacker-written PHP from persisting across restarts)
 - **Unix-socket-only php-fpm** — no TCP listener on 9000, so a sibling container on the snipeit network can't bypass nginx and speak FastCGI directly to `app`
-- **Pinned upstream** — Snipe-IT git-tag-pinned via `.snipe-it-version`, image SHAs pinned in [`Dockerfile`](Dockerfile)
+- **Pinned upstream** — Snipe-IT git-tag-pinned via [`.snipe-it-version`](.snipe-it-version); base PHP + Alpine versions tag-pinned in [`Dockerfile`](Dockerfile) (rebuilt daily so re-tagged registry content is picked up)
 - **Daily rebuild** — picks up base-image CVEs without waiting for upstream
-- **Supply chain** — SLSA build provenance + SBOM (cosign signing post-MVP)
+- **Supply chain** — SLSA build provenance attestations (in-toto via [`attest-build-provenance`](https://github.com/actions/attest-build-provenance)), SBOM (BuildKit `sbom=true`), and a keyless cosign signature on the image manifest (OIDC, Rekor-logged) — all attached on every push and scheduled build
 - **CVE scanning** — daily Trivy + osv-scanner runs (see [Actions → security](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/security.yml)). Findings are informational, NOT CI gates — most flagged CVEs are in Snipe-IT's upstream-pinned `composer.lock` (e.g. `phpseclib`, `onelogin/php-saml`) and need an upstream fix. Trivy SARIF uploads to GitHub code-scanning; subscribe via the repo Security tab for new-finding alerts.
 
 ## Backups
@@ -265,7 +268,7 @@ When fronting Bugsink with TLS, set `BUGSINK_PUBLIC_URL=https://bugsink.example.
 
 | Path | Contents | Retention |
 |---|---|---|
-| `db/snipeit-db-*.sql.gz` | mariadb-dump (single-transaction, with routines) | rolling capacity (~5 GB) |
+| `db/snipeit-db-*.sql.gz` | mariadb-dump (single-transaction) | rolling capacity (~5 GB) |
 | `uploads/snipeit-uploads-*.tar.gz` | Snipe-IT uploads (`app-data` volume) | 30 days |
 | `storage/snipeit-storage-*.tar.gz` | Laravel storage (`app-storage` volume) | 30 days |
 
@@ -283,7 +286,7 @@ The `app` entrypoint runs `php artisan migrate --force` on every start. No DDL g
 
 When something breaks, [`docs/runbook-day2-ops.md`](docs/runbook-day2-ops.md) catalogues the failure modes we know about — symptom → first check → recovery. Common ones:
 
-- **App returns 500** — `make logs-app` (Laravel logs to stdout as JSON since v0.2)
+- **App returns 500** — `make logs-app` (Laravel logs to stdout as JSON via `LOG_CHANNEL=stderr` + `LOG_STDERR_FORMATTER`)
 - **Users randomly logged out** — Valkey LRU eviction; tune `--maxmemory` in `compose.yml` or switch to `SESSION_DRIVER=file`
 - **`make up` complains about missing `.env`** — run `make init` first; the Makefile guard prevents the empty-root-password footgun
 - **Backup-volume full** — `make backup-verify` flags it; tune retention in `config/phpbu/backup.json`
