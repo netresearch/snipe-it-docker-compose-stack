@@ -34,7 +34,18 @@ case "$action" in
   *) echo "Usage: $0 add|remove|list [PATH...]" >&2; exit 1 ;;
 esac
 
-current="$(awk '/^COMPOSE_FILE=/ {sub(/^COMPOSE_FILE=/, ""); print; exit}' "$ENV_FILE" || true)"
+# Read COMPOSE_FILE tolerantly: allow optional spaces around `=` and
+# optional surrounding double/single quotes (operators sometimes hand-edit
+# the file). env-set.sh always writes bare values, so this only matters
+# for hand-edited cases.
+current="$(awk '/^[[:space:]]*COMPOSE_FILE[[:space:]]*=/ {
+    sub(/^[[:space:]]*COMPOSE_FILE[[:space:]]*=[[:space:]]*/, "");
+    print; exit
+}' "$ENV_FILE" || true)"
+case "$current" in
+  '"'*'"') current="${current#\"}"; current="${current%\"}" ;;
+  "'"*"'") current="${current#\'}"; current="${current%\'}" ;;
+esac
 [[ -z "$current" ]] && current="$BASE"
 
 case "$action" in
@@ -101,9 +112,11 @@ if [[ "$current" == "$BASE" ]]; then
   if grep -q '^COMPOSE_FILE=' "$ENV_FILE"; then
     # env-set with empty value leaves COMPOSE_FILE= in place; we want it
     # GONE so compose's own default takes over. Strip the line directly.
-    tmp=$(mktemp)
+    # Temp file in same dir → atomic rename(2); BSD/macOS stat uses
+    # '%Lp' (numeric); '-f %A' would return the symbolic mode string.
+    tmp=$(mktemp "${ENV_FILE}.XXXXXX")
     grep -v '^COMPOSE_FILE=' "$ENV_FILE" > "$tmp" || true
-    mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%A' "$ENV_FILE")
+    mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")
     mv "$tmp" "$ENV_FILE"
     chmod "$mode" "$ENV_FILE"
   fi

@@ -35,7 +35,9 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 # tail of a multi-line value dangling as bareword lines).
 [[ "$VALUE" != *$'\n'* ]] || { echo "env-set: VALUE must not contain newlines" >&2; exit 1; }
 
-tmp=$(mktemp)
+# Create the temp file in the same directory as $ENV_FILE so the final
+# `mv` is atomic (rename(2) only guarantees atomicity within a filesystem).
+tmp=$(mktemp "${ENV_FILE}.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
 if grep -q "^${KEY}=" "$ENV_FILE"; then
@@ -55,7 +57,10 @@ else
 fi
 
 # Preserve .env's existing mode (init.sh writes umask 077 → 0600).
-mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%A' "$ENV_FILE")
+# Linux stat uses `-c '%a'` (numeric); BSD/macOS stat uses `-f '%Lp'`.
+# Plain `-f '%A'` on BSD returns a symbolic mode string ("rw-------"),
+# which chmod doesn't accept — use `%Lp` for the lower-12-bits numeric.
+mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE")
 mv "$tmp" "$ENV_FILE"
 chmod "$mode" "$ENV_FILE"
 trap - EXIT
