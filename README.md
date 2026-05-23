@@ -46,6 +46,7 @@ Made by [Netresearch DTT GmbH](https://www.netresearch.de/) on the back of a rea
 | **valkey** | `valkey/valkey:9-alpine` | Cache + sessions + queue backend (Redis-compatible) |
 | **app** | `ghcr.io/netresearch/snipe-it-php-fpm` | **Our** php-fpm image, Snipe-IT app code |
 | **web** | `nginx:alpine` | Static asset serving + fastcgi → `app:9000` |
+| **worker** | (same as `app`) | `php artisan queue:work` daemon — consumes async jobs from valkey (emails, EOL reminders, etc.) |
 | **scheduler** | `ghcr.io/netresearch/ofelia` | Label-driven cron for `artisan schedule:run` (per minute) **and** the nightly `phpbu` backup |
 | **backup** | `ghcr.io/netresearch/phpbu-docker` | Nightly DB dump + uploads/storage tarball with retention policy |
 | **app-assets** | (same as `app`) | One-shot init: syncs `public/` into the shared volume |
