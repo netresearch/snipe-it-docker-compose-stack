@@ -172,7 +172,7 @@ Operational toggles:
 | Variable | Default | Description |
 |---|---|---|
 | `SNIPE_IT_IMAGE_TAG` | `latest` | Pin to a specific image build |
-| `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_DRIVER` | `redis` | Laravel driver name (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
+| `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_CONNECTION` | `redis` | Laravel driver name (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
 | `SKIP_MIGRATIONS` | `false` | Skip `php artisan migrate --force` at container start |
 | `TZ` | `UTC` | IANA timezone |
 
