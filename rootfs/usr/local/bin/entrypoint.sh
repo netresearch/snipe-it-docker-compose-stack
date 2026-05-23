@@ -104,27 +104,6 @@ chmod 0775 \
   /var/lib/snipeit 2>/dev/null || true
 
 # ---------------------------------------------------------------------
-# 3b. Passport / OAuth key bootstrap
-# ---------------------------------------------------------------------
-# Snipe-IT uses Laravel Passport for OAuth. The asymmetric keypair lives at
-# storage/oauth-{private,public}.key. If either is missing — fresh install,
-# or storage volume was nuked — the UI works but every /oauth/* request 500s
-# silently (catastrophic for API consumers). Generate the pair before
-# php-fpm starts so OAuth is functional from the very first request.
-#
-# `passport:keys --force` is a file-only operation (no DB), so we run it
-# here, before the DB wait. The `[ ! -f X ] || [ ! -f Y ]` guard is
-# load-bearing: --force would overwrite an existing keypair and revoke all
-# outstanding access tokens.
-if [ ! -f /var/www/html/storage/oauth-private.key ] || \
-   [ ! -f /var/www/html/storage/oauth-public.key ]; then
-  log "OAuth/Passport keys missing — generating via artisan passport:keys"
-  su-exec www-data php artisan passport:keys --force --no-interaction
-else
-  log "OAuth/Passport keys present"
-fi
-
-# ---------------------------------------------------------------------
 # 4. Wait for DB (skip if SKIP_DB_WAIT=true)
 # ---------------------------------------------------------------------
 DB_WAIT_TIMEOUT="${DB_WAIT_TIMEOUT:-60}"
@@ -176,6 +155,30 @@ fi
 # bearing invariant. We never want to leave the app in maintenance mode
 # just because migrations failed.
 cd /var/www/html
+
+# ---------------------------------------------------------------------
+# 5a. Passport / OAuth key bootstrap (after DB wait + cd /var/www/html)
+# ---------------------------------------------------------------------
+# Snipe-IT uses Laravel Passport for OAuth. The asymmetric keypair lives at
+# storage/oauth-{private,public}.key. If either is missing — fresh install,
+# or storage volume was nuked — the UI works but every /oauth/* request 500s
+# silently (catastrophic for API consumers). Generate the pair before
+# php-fpm starts so OAuth is functional from the very first request.
+#
+# Placement rationale: any `php artisan` invocation boots the Laravel
+# framework, which loads service providers — some of which query the DB
+# for settings before any command runs. So we have to be AFTER the DB
+# wait. We're also AFTER `cd /var/www/html` so artisan can find itself.
+# The `[ ! -f X ] || [ ! -f Y ]` guard is load-bearing: --force would
+# overwrite an existing keypair and revoke all outstanding access tokens.
+if [ ! -f /var/www/html/storage/oauth-private.key ] || \
+   [ ! -f /var/www/html/storage/oauth-public.key ]; then
+  log "OAuth/Passport keys missing — generating via artisan passport:keys"
+  su-exec www-data php artisan passport:keys --force --no-interaction
+else
+  log "OAuth/Passport keys present"
+fi
+
 if [ "$SKIP_MIGRATIONS" = "true" ]; then
   log "SKIP_MIGRATIONS=true — skipping artisan down/migrate/up"
 else
