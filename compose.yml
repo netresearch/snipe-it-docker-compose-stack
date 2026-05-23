@@ -59,14 +59,21 @@ x-app-env: &app-env
   APP_URL: ${APP_URL:-http://localhost:8000}
   APP_ENV: ${APP_ENV:-production}
   APP_DEBUG: ${APP_DEBUG:-false}
+  # TZ sets the OS clock (cron/log timestamps inside the container).
+  # APP_TIMEZONE is what Laravel/Snipe-IT actually reads for date/time
+  # display (config/app.php). Keep them in sync by defaulting
+  # APP_TIMEZONE to TZ — operators set one var, both honour it.
   TZ: ${TZ:-UTC}
+  APP_TIMEZONE: ${APP_TIMEZONE:-${TZ:-UTC}}
   # Pipe Laravel logs to container stdout in JSON — `docker compose logs app`
   # now shows app errors instead of leaving them in a volume nobody checks.
   LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
   LOG_STDERR_FORMATTER: ${LOG_STDERR_FORMATTER:-Monolog\Formatter\JsonFormatter}
   # Secure session cookie ON by default. Override to false ONLY in dev
-  # where you serve plain HTTP locally.
-  SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-true}
+  # where you serve plain HTTP locally. Snipe-IT reads this as
+  # `SECURE_COOKIES` (config/session.php uses env('SECURE_COOKIES')),
+  # NOT the more Laravel-conventional `SESSION_SECURE_COOKIE`.
+  SECURE_COOKIES: ${SECURE_COOKIES:-true}
   DB_CONNECTION: mysql
   DB_HOST: db
   DB_PORT: 3306

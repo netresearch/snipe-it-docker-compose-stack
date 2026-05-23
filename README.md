@@ -58,7 +58,7 @@ The php-fpm image (`ghcr.io/netresearch/snipe-it-php-fpm`) is intentionally narr
 | | |
 |---|---|
 | **Base** | `php:8.5-fpm-alpine` |
-| **PHP extensions** | bcmath, gd, intl, ldap, mbstring, opcache, pdo_mysql, redis, xml, zip |
+| **PHP extensions** | bcmath, exif, gd, intl, ldap, mbstring, opcache, pdo_mysql, redis, xml, zip |
 | **Runtime user** | `www-data` (non-root) |
 | **Init** | `tini` as PID 1 → entrypoint → php-fpm |
 | **Healthcheck** | `cgi-fcgi` ping on 127.0.0.1:9000 |
@@ -276,12 +276,6 @@ For disaster recovery (lost DB / corrupted volume), [`docs/runbook-restore.md`](
 - [snipe/snipe-it](https://hub.docker.com/r/snipe/snipe-it) — official Docker image
 - [netresearch/ofelia](https://github.com/netresearch/ofelia) — the scheduler this stack uses
 - [netresearch/phpbu-docker](https://github.com/netresearch/phpbu-docker) — the backup engine this stack uses
-
-## Roadmap notes
-
-- **Reusable workflows.** The five workflows in `.github/workflows/` overlap heavily with patterns used by sibling container repos (e.g. `netresearch/phpbu-docker`). Track [#TODO](https://github.com/netresearch/snipe-it-docker-compose-stack/issues) for centralisation under `netresearch/.github` (analog to the go-workflows pattern) so consumers become thin callers.
-- **arm64 native runners.** Multi-arch builds currently use QEMU emulation (~40 min wall-time). Splitting amd64 + arm64 onto separate jobs (`ubuntu-latest` + `ubuntu-24.04-arm`) and joining via manifest list would cut wall-time to ~15 min.
-- **First release tag.** Once the daily-rebuild cycle has produced 1-2 weeks of green builds, cut `v0.1.0` to seed a release workflow.
 
 ## Contributing
 
