@@ -87,6 +87,15 @@ x-app-env: &app-env
   MAIL_ENCRYPTION: ${MAIL_ENCRYPTION:-tls}
   MAIL_FROM_ADDR: ${MAIL_FROM_ADDR:-noreply@example.com}
   MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Snipe-IT}
+  # Sentry / Bugsink error tracking. Empty = SDK loaded but inactive (no
+  # network calls, no reports sent). Set to a Sentry- or Bugsink-DSN to
+  # enable: https://<key>@<host>/<project-id>. Sample rates default to 0
+  # (errors only); raise SENTRY_TRACES_SAMPLE_RATE / SENTRY_PROFILES_
+  # SAMPLE_RATE to capture performance data if your Bugsink instance is
+  # sized for the traffic.
+  SENTRY_LARAVEL_DSN: ${SENTRY_LARAVEL_DSN:-}
+  SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.0}
+  SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
 
 services:
   # ---------------------------------------------------------------------

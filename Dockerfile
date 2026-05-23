@@ -84,11 +84,22 @@ RUN --mount=type=cache,target=/root/.composer/cache \
     else \
         echo "[composer] no GH_TOKEN secret available — falling back to anonymous github.com (60 req/h)"; \
     fi; \
-    if [ "${ROLLING_DEPS}" = "true" ]; then \
+    # Add sentry/sentry-laravel to the Snipe-IT composer.json. Done BEFORE \
+    # the rolling-lock-delete and BEFORE composer install so the package \
+    # lands in both pinned and rolling builds. \
+    # --no-install: don't install yet (composer install below does that). \
+    # --no-scripts / --no-interaction: keep the build deterministic. \
+    # SDK auto-discovery registers the ServiceProvider; activation is \
+    # controlled at runtime by SENTRY_LARAVEL_DSN — empty = silently \
+    # disabled, set = enabled. Compatible with Bugsink (self-hosted, \
+    # Sentry-protocol-compatible) using the same DSN format. \
+    composer require --no-install --no-scripts --no-interaction \
+        sentry/sentry-laravel:^4 \
+    && if [ "${ROLLING_DEPS}" = "true" ]; then \
         echo "[rolling-variant] deleting composer.lock to resolve fresh deps"; \
         rm -f composer.lock; \
-    fi; \
-    composer install \
+    fi \
+    && composer install \
         --no-dev \
         --no-progress \
         --no-scripts \
@@ -173,6 +184,12 @@ LABEL org.opencontainers.image.title="snipe-it-php-fpm" \
       org.opencontainers.image.version="${SNIPE_IT_VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}"
+
+# Sentry: bake SENTRY_RELEASE into the runtime so error reports auto-tag
+# which Snipe-IT version this image represents. Bugsink/Sentry use it to
+# pinpoint regressions to a specific release. Operators can override per
+# deployment via the env var if they ship their own image variants.
+ENV SENTRY_RELEASE=snipe-it@${SNIPE_IT_VERSION}
 
 RUN set -eux; \
     apk add --no-cache \

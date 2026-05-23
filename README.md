@@ -176,8 +176,13 @@ Operational toggles:
 | `CACHE_DRIVER` / `SESSION_DRIVER` / `QUEUE_CONNECTION` | `redis` | Laravel driver name (RESP protocol). Flip to `file`/`file`/`sync` if you remove the valkey service |
 | `SKIP_MIGRATIONS` | `false` | Skip `php artisan migrate --force` at container start |
 | `TZ` | `UTC` | IANA timezone |
+| `SENTRY_LARAVEL_DSN` | _(empty)_ | Error tracking DSN — empty disables; works with [Bugsink](https://www.bugsink.com/) (self-hosted) or [Sentry SaaS](https://sentry.io/) |
 
 Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secrets/db_password`).
+
+### Error tracking (Sentry / Bugsink)
+
+The image ships `sentry/sentry-laravel` pre-installed. Set `SENTRY_LARAVEL_DSN` to your project DSN to start collecting errors — anything that format-matches `https://<key>@<host>/<project-id>` works. The default empty value keeps the SDK silent (no network calls). [Bugsink](https://www.bugsink.com/) is recommended for self-hosting since it speaks the Sentry wire protocol and avoids the SaaS data-egress concern for an internal asset-management tool.
 
 ## Security posture
 
