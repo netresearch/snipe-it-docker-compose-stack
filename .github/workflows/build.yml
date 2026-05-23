@@ -47,8 +47,8 @@ concurrency:
 
 jobs:
   build:
-    name: build (${{ matrix.track.name }}/${{ matrix.composer }})
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.track.name }}/${{ matrix.composer }}/${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     # Rolling variants resolve composer deps fresh against composer.json
     # ranges, so they fail whenever upstream Snipe-IT's constraints
     # reference a major that's now under a composer audit advisory
@@ -90,6 +90,17 @@ jobs:
           # `rolling` — composer.lock deleted before install (catches transitive CVEs)
           - pinned
           - rolling
+        platform:
+          # Native runners per arch — no QEMU emulation. amd64 builds
+          # on ubuntu-latest (~12 min), arm64 on ubuntu-24.04-arm (~12
+          # min, in parallel). Previous arrangement was QEMU-emulated
+          # arm64 on ubuntu-latest, adding ~25 min per cell. The merge
+          # job below joins the two per-arch digests into a single
+          # multi-arch manifest list per (track, composer) cell.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
         exclude:
           # tag/rolling is structurally impossible to be green: snipe-it's
           # tagged composer.json carries a `symfony/dom-crawler ^4.4`
@@ -177,9 +188,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Resolved: track=$TRACK_NAME ref=$REF version=$VERSION"
 
-      - name: Set up QEMU
-        if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      # QEMU intentionally NOT installed: native amd64 + arm64 runners
+      # build their own platform. The previous emulated arm64 build on
+      # ubuntu-latest added ~25 min to wall-time per cell.
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.skip != 'true'
@@ -273,16 +284,20 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
 
-      - name: Build (and push if not PR)
+      - name: Build (by digest, no tags yet — tags pushed by merge job)
         if: steps.gate.outputs.skip != 'true'
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
-          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          platforms: linux/${{ matrix.platform.arch }}
           target: runtime
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          # Push by digest only: no human-readable tag is attached to
+          # this per-platform manifest. The merge job downloads all
+          # per-arch digests and creates a single multi-arch manifest
+          # list with the actual tags. Skipped entirely on PR events
+          # (push: false) so PRs never write to the registry.
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SNIPE_IT_VERSION=${{ steps.ref.outputs.ref }}
@@ -313,17 +328,253 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}
           cache-to: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }},mode=max
 
-      - name: Attest build provenance
+      # Per-arch digest export. The merge job downloads every per-arch
+      # artifact for a given (track, composer) and joins them into one
+      # multi-arch manifest. Attestation + cosign signing happen on
+      # that final manifest in the merge job — signing per-arch
+      # manifests would produce N signatures the consumer would have
+      # to verify in lockstep with the platform they're pulling.
+      - name: Export per-arch digest
         if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          # File name is the digest minus the algorithm prefix, content
+          # is empty — the file's existence + its name is the payload.
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload per-arch digest artifact
+        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: digests-${{ matrix.track.name }}-${{ matrix.composer }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─ Merge per-arch digests into a single multi-arch manifest list ───────
+  # Runs once per (track, composer) cell after all per-arch builds in
+  # that cell complete. Downloads all digest artifacts for the cell,
+  # creates the manifest list with the canonical tags, and pushes it.
+  # Then runs attestation + cosign signing on the merged manifest.
+  merge:
+    name: merge (${{ matrix.track.name }}/${{ matrix.composer }})
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.composer == 'rolling' }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        track:
+          - &tag-track-merge
+            name: tag
+            ref_source: file
+            tags_extra: ''
+          - name: master
+            ref_source: master
+            tags_extra: 'master'
+          - name: develop
+            ref_source: develop
+            tags_extra: 'develop,nightly'
+        composer:
+          - pinned
+          - rolling
+        exclude:
+          # Same as the build matrix — tag/rolling is structurally
+          # impossible to be green (symfony/dom-crawler ^4.4 + audit).
+          - track: *tag-track-merge
+            composer: rolling
+    steps:
+      - name: Filter — should this track run?
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          TRACK: ${{ matrix.track.name }}
+          INPUT_TRACK: ${{ inputs.track }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_TRACK" ] \
+              && [ "$INPUT_TRACK" != "all" ] && [ "$INPUT_TRACK" != "$TRACK" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve build ref for this track
+        if: steps.gate.outputs.skip != 'true'
+        id: ref
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_SOURCE: ${{ matrix.track.ref_source }}
+          INPUT_VERSION: ${{ inputs.snipe_it_version }}
+          TRACK_NAME: ${{ matrix.track.name }}
+        run: |
+          # Same logic as the build job's Resolve step — re-run so the
+          # merge job's tag computation uses the identical ref the build
+          # job did. (Inlined rather than factored to keep the workflow
+          # readable; ~20 lines.)
+          set -euo pipefail
+          if [ "$REF_SOURCE" = "file" ]; then
+            REF="${INPUT_VERSION:-$(cat .snipe-it-version)}"
+          else
+            REF=$(gh api "repos/grokability/snipe-it/branches/$REF_SOURCE" --jq '.commit.sha')
+          fi
+          VERSION="${REF#v}"
+          MAJOR_MINOR=$(echo "$VERSION" | awk -F. '{print $1 "." $2}')
+          MAJOR=$(echo "$VERSION" | awk -F. '{print $1}')
+          IS_TAG="false"
+          [ "$REF_SOURCE" = "file" ] && IS_TAG="true"
+          {
+            echo "ref=$REF"
+            echo "version=$VERSION"
+            echo "major=$MAJOR"
+            echo "major_minor=$MAJOR_MINOR"
+            echo "is_tag=$IS_TAG"
+            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "date_tag=$(date -u +'%Y%m%d')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download per-arch digests
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.track.name }}-${{ matrix.composer }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to ghcr.io
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags (tag-stream)
+        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source == 'file'
+        id: tags_tag
+        env:
+          IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
+          COMPOSER_MODE: ${{ matrix.composer }}
+          REF_VERSION: ${{ steps.ref.outputs.version }}
+          REF_DATE_TAG: ${{ steps.ref.outputs.date_tag }}
+          REF_MAJOR_MINOR: ${{ steps.ref.outputs.major_minor }}
+          REF_MAJOR: ${{ steps.ref.outputs.major }}
+          IS_MAIN_REF: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          SUF=""
+          LATEST="latest"
+          if [ "$COMPOSER_MODE" = "rolling" ]; then
+            SUF="-rolling"
+            LATEST="rolling"
+          fi
+          ENABLE_LATEST="false"
+          if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
+            ENABLE_LATEST="true"
+          fi
+          {
+            echo "tags<<__EOF__"
+            echo "type=raw,value=${REF_VERSION}${SUF}"
+            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
+            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
+            echo "type=raw,value=${REF_MAJOR}${SUF}"
+            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
+            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags (branch-stream)
+        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source != 'file'
+        id: tags_branch
+        env:
+          COMPOSER_MODE: ${{ matrix.composer }}
+          TAGS_EXTRA: ${{ matrix.track.tags_extra }}
+          REF_VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          SUF=""
+          if [ "$COMPOSER_MODE" = "rolling" ]; then
+            SUF="-rolling"
+          fi
+          {
+            echo "tags<<__EOF__"
+            # shellcheck disable=SC2086 # word-split intentional on comma list
+            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
+              echo "type=raw,value=${t}${SUF}"
+            done
+            echo "type=raw,value=${REF_VERSION}${SUF}"
+            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        if: steps.gate.outputs.skip != 'true'
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
+
+      - name: Create + push multi-arch manifest list
+        if: steps.gate.outputs.skip != 'true'
+        id: manifest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          METADATA_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          set -euo pipefail
+          # Build the -t flag list from metadata-action's tag output
+          # (JSON array under .tags). Build the per-arch source-image
+          # arguments from the digest files dropped by the build jobs.
+          mapfile -t TAG_FLAGS < <(jq -r '.tags[] | "-t \(.)"' <<<"$METADATA_JSON")
+          mapfile -t SRC_REFS < <(
+            find /tmp/digests -maxdepth 1 -type f -printf "${IMAGE}@sha256:%f\n"
+          )
+          # Sanity: we expect exactly 2 per-arch digests (amd64+arm64).
+          # If a build-job arch failed silently — or a pattern-mismatch
+          # on the artifact download dropped a digest — we'd otherwise
+          # publish a degenerate single-arch manifest under the multi-
+          # arch tag. Fail loudly instead.
+          if [ "${#SRC_REFS[@]}" -ne 2 ]; then
+            echo "ERROR: expected 2 per-arch digests, got ${#SRC_REFS[@]}" >&2
+            printf '  %s\n' "${SRC_REFS[@]}" >&2
+            exit 1
+          fi
+          echo "tags:"
+          printf '  %s\n' "${TAG_FLAGS[@]}"
+          echo "sources:"
+          printf '  %s\n' "${SRC_REFS[@]}"
+          docker buildx imagetools create "${TAG_FLAGS[@]}" "${SRC_REFS[@]}"
+          # Inspect the first tag to capture the manifest digest for
+          # attestation + cosign below.
+          FIRST_TAG=$(jq -r '.tags[0]' <<<"$METADATA_JSON")
+          MANIFEST_DIGEST=$(docker buildx imagetools inspect "$FIRST_TAG" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance (on multi-arch manifest)
+        if: steps.gate.outputs.skip != 'true'
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
 
-      # ─ Keyless cosign signing ───────────────────────────────────────────
-      # Complements the SLSA provenance attestation above with a cosign
-      # signature on the image manifest. The two are NOT duplicates:
+      # ─ Keyless cosign signing on the multi-arch manifest digest ─────────
+      # `attest-build-provenance` and `cosign sign` are NOT duplicates:
       #   * `attest-build-provenance` attaches an in-toto SLSA predicate
       #     describing HOW the artefact was built (verifiable via
       #     `gh attestation verify` or `cosign verify-attestation`).
@@ -331,16 +582,15 @@ jobs:
       #     workflow signed it (verifiable via `cosign verify` with the
       #     workflow identity / certificate-identity-regexp).
       # Both land in the Rekor transparency log; consumers may pin to
-      # either or both depending on their policy engine (Sigstore policy
-      # controller, Kyverno, OPA, …).
+      # either or both depending on their policy engine.
       - name: Install cosign
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+        if: steps.gate.outputs.skip != 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Sign image with cosign (keyless / OIDC)
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
+      - name: Sign manifest with cosign (keyless / OIDC)
+        if: steps.gate.outputs.skip != 'true'
         env:
           COSIGN_EXPERIMENTAL: '1'
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
         run: |
           cosign sign --yes "$IMAGE_REF"
