@@ -66,8 +66,8 @@ Usually one of three:
   the cookie never makes it back. Fix: update `APP_URL` in `.env`,
   `make restart`.
 - **Cookie not flagged secure but served over HTTPS** — happens when
-  `SESSION_SECURE_COOKIE=false` (our default is `true`). If you're
-  serving plain HTTP in dev, set `SESSION_SECURE_COOKIE=false` in
+  `SECURE_COOKIES=false` (our default is `true`). If you're
+  serving plain HTTP in dev, set `SECURE_COOKIES=false` in
   `compose.override.yml`.
 - **Valkey lost the session.** See cache pressure below.
 
