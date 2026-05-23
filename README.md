@@ -184,6 +184,19 @@ Docker secrets supported via `*_FILE` env vars (e.g. `DB_PASSWORD_FILE=/run/secr
 
 The image ships `sentry/sentry-laravel` pre-installed. Set `SENTRY_LARAVEL_DSN` to your project DSN to start collecting errors — anything that format-matches `https://<key>@<host>/<project-id>` works. The default empty value keeps the SDK silent (no network calls). [Bugsink](https://www.bugsink.com/) is recommended for self-hosting since it speaks the Sentry wire protocol and avoids the SaaS data-egress concern for an internal asset-management tool.
 
+#### Self-hosted Bugsink as an overlay
+
+To run Bugsink alongside Snipe-IT with no manual DSN copying, layer [`examples/compose.bugsink.yml`](examples/compose.bugsink.yml):
+
+```bash
+# 1. Fill the three required Bugsink vars in .env (SECRET_KEY, ADMIN_EMAIL, ADMIN_PASSWORD)
+docker compose -f compose.yml -f examples/compose.bugsink.yml up -d
+```
+
+The overlay adds a SQLite-backed `bugsink` service (internal network only) and a one-shot `bugsink-init` container that seeds a `snipe-it` project in Bugsink and writes its DSN into a shared volume. The `app` and `worker` services pick the DSN up via `SENTRY_LARAVEL_DSN_FILE` — no `.env` editing needed beyond the Bugsink credentials. Re-runs are idempotent.
+
+To reach the Bugsink UI, layer [`examples/compose.traefik.yml`](examples/compose.traefik.yml) or [`examples/compose.caddy.yml`](examples/compose.caddy.yml) and add a route to `bugsink:8000`.
+
 ## Security posture
 
 - **Non-root execution** — `www-data` runs php-fpm; entrypoint drops privileges with `su-exec` after volume permission repair
