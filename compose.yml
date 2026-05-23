@@ -79,7 +79,7 @@ x-app-env: &app-env
   REDIS_PASSWORD: ${REDIS_PASSWORD:-}
   CACHE_DRIVER: ${CACHE_DRIVER:-redis}
   SESSION_DRIVER: ${SESSION_DRIVER:-redis}
-  QUEUE_DRIVER: ${QUEUE_DRIVER:-redis}
+  QUEUE_CONNECTION: ${QUEUE_CONNECTION:-redis}
   MAIL_HOST: ${MAIL_HOST:-}
   MAIL_PORT: ${MAIL_PORT:-587}
   MAIL_USERNAME: ${MAIL_USERNAME:-}
@@ -375,6 +375,96 @@ services:
       - /tmp:mode=1777,size=64M,noexec,nosuid,nodev
       - /var/cache/nginx:mode=0755,size=64M,nosuid,nodev
       - /var/run:mode=0755,size=8M,nosuid,nodev
+    networks:
+      - snipeit
+
+  # ---------------------------------------------------------------------
+  # Worker — long-running `php artisan queue:work` daemon. Consumes jobs
+  # that the `app` service (web requests) and `scheduler` service
+  # (cron-driven `schedule:run`) dispatch to valkey via Laravel's redis
+  # queue driver.
+  #
+  # Without this service, jobs would land in valkey but never run —
+  # emails would be dispatched-but-never-sent, EOL reminders would be
+  # queued-but-never-delivered, etc. So this service is what makes
+  # QUEUE_CONNECTION=redis functional end-to-end.
+  #
+  # Same image as `app` (snipe-it-php-fpm), but the CMD overrides php-fpm
+  # with `php artisan queue:work`. The container's entrypoint still runs
+  # — that handles DB-wait + Passport key check — but SKIP_MIGRATIONS is
+  # set true so the worker doesn't race with `app` on schema migration.
+  # `depends_on: app: service_healthy` guarantees migrations + cache
+  # warmup are done by `app` before the worker boots.
+  #
+  # Self-recycling flags:
+  #   --memory=128       restart if RSS exceeds 128 MiB (defends against
+  #                       long-running-process memory leaks)
+  #   --max-jobs=1000    restart after 1000 jobs (same idea, job-count
+  #                       axis)
+  #   --max-time=3600    restart after 1h wall clock (third axis)
+  #   --tries=3          retry failed jobs 3× before pushing to
+  #                       failed_jobs table
+  #   --timeout=120      kill jobs running >120s (prevents one stuck
+  #                       SMTP/SOAP call from blocking the queue)
+  #   --sleep=3          sleep 3s when queue is empty (vs busy-loop)
+  # `restart: unless-stopped` plus the above flags = self-healing daemon.
+  # ---------------------------------------------------------------------
+  worker:
+    image: ghcr.io/netresearch/snipe-it-php-fpm:${SNIPE_IT_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *logging
+    depends_on:
+      db:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      # Skip migrations + cache rebuild — `app` already did those. Avoids
+      # a worker boot racing with app on the same migration / wiping the
+      # app's freshly-warmed bootstrap cache.
+      SKIP_MIGRATIONS: "true"
+    command:
+      - php
+      - artisan
+      - queue:work
+      - --tries=3
+      - --timeout=120
+      - --memory=128
+      - --sleep=3
+      - --max-jobs=1000
+      - --max-time=3600
+    volumes:
+      - app-data:/var/lib/snipeit             # uploads (jobs may read attached files for emails)
+      - app-storage:/var/www/html/storage     # Laravel storage (logs, framework cache)
+    healthcheck:
+      # `queue:work` runs as www-data after entrypoint's su-exec. pgrep
+      # without a UID filter catches both the entrypoint shell (during
+      # boot) and the running queue:work process — either means "alive"
+      # for healthcheck purposes.
+      test: ["CMD-SHELL", "pgrep -f 'artisan queue:work' >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      # 120s start_period covers the entrypoint's DB-wait + Passport
+      # check + cache rebuild before queue:work actually starts.
+      start_period: 120s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # entrypoint chowns storage volume to www-data
+      - DAC_OVERRIDE   # entrypoint accesses files across uid boundaries
+      - FOWNER         # entrypoint chmods storage volume
+      - SETUID         # su-exec drops to www-data
+      - SETGID         # su-exec drops to www-data
+    tmpfs:
+      - /tmp:mode=1777,size=64M,noexec,nosuid,nodev
     networks:
       - snipeit
 

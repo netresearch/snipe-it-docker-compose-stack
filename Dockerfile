@@ -133,7 +133,7 @@ RUN set -eux; \
     echo "DB_DATABASE=:memory:" >> .env; \
     echo "CACHE_DRIVER=array" >> .env; \
     echo "SESSION_DRIVER=array" >> .env; \
-    echo "QUEUE_DRIVER=sync" >> .env; \
+    echo "QUEUE_CONNECTION=sync" >> .env; \
     echo "MAIL_MAILER=log" >> .env
 
 # Run upstream tests. Snipe-IT uses phpunit + the `php artisan test`
