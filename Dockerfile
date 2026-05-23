@@ -71,10 +71,15 @@ RUN --mount=type=cache,target=/root/.composer/cache \
     --mount=type=secret,id=GH_TOKEN \
     set -eux; \
     if [ -s /run/secrets/GH_TOKEN ]; then \
-        # Split declare + export so shellcheck SC2155 doesn't fire — \
-        # otherwise cat's exit code would be masked by export. \
+        # Disable xtrace before reading the secret so the export line — \
+        # which contains the expanded token value — is not echoed into \
+        # the build log. Restore xtrace immediately after exporting and \
+        # unsetting the bare variable. \
+        set +x; \
         GH_TOKEN=$(cat /run/secrets/GH_TOKEN); \
         export COMPOSER_AUTH="{\"github-oauth\":{\"github.com\":\"${GH_TOKEN}\"}}"; \
+        unset GH_TOKEN; \
+        set -x; \
         echo "[composer] github.com authenticated via BuildKit secret"; \
     else \
         echo "[composer] no GH_TOKEN secret available — falling back to anonymous github.com (60 req/h)"; \
