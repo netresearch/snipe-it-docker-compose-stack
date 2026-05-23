@@ -46,7 +46,7 @@ RUN set -eux; \
         libxml2-dev libzip-dev oniguruma-dev openldap-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
-        bcmath gd intl ldap mbstring pdo_mysql xml zip \
+        bcmath exif gd intl ldap mbstring pdo_mysql xml zip \
     && curl -sS https://getcomposer.org/installer \
         | php -- --quiet --install-dir=/usr/local/bin --filename=composer \
     && composer --version
@@ -190,8 +190,12 @@ RUN set -eux; \
     # `docker-php-ext-install opcache` against PHP 8.5 fails with
     # `cp: can't stat 'modules/*'` because there's no shared module to install.
     # Our snipe-it.ini's opcache.* settings still apply unchanged.
+    #
+    # exif: required by Snipe-IT's image-orientation handling for uploaded
+    # asset photos. Without it, EXIF-rotated phone photos render sideways.
+    # Listed in upstream's pre-flight extension list in upgrade.php.
     && docker-php-ext-install -j"$(nproc)" \
-        bcmath gd intl ldap mbstring pdo_mysql xml zip \
+        bcmath exif gd intl ldap mbstring pdo_mysql xml zip \
     # Pin pecl redis to a specific stable version for reproducible builds.
     # Unpinned `pecl install redis` resolves to whatever is latest at build
     # time — changes silently between rebuilds and can introduce ABI/behaviour
