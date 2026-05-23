@@ -34,7 +34,7 @@ case "$action" in
   *) echo "Usage: $0 add|remove|list [PATH...]" >&2; exit 1 ;;
 esac
 
-current="$(awk -F= '/^COMPOSE_FILE=/ {sub(/^COMPOSE_FILE=/, ""); print; exit}' "$ENV_FILE" || true)"
+current="$(awk '/^COMPOSE_FILE=/ {sub(/^COMPOSE_FILE=/, ""); print; exit}' "$ENV_FILE" || true)"
 [[ -z "$current" ]] && current="$BASE"
 
 case "$action" in
@@ -46,6 +46,12 @@ case "$action" in
   add)
     [[ $# -gt 0 ]] || { echo "compose-file add: at least one PATH required" >&2; exit 1; }
     for p in "$@"; do
+      # Only allow examples/compose.*.yml — anything else is either a typo
+      # or someone wiring an untrusted compose file into the stack.
+      case "$p" in
+        examples/compose.*.yml) ;;
+        *) echo "compose-file: only examples/compose.*.yml paths are allowed (got: $p)" >&2; exit 1 ;;
+      esac
       [[ -f "$p" ]] || { echo "compose-file: $p not found" >&2; exit 1; }
       # Use boundaries to avoid partial-string matches (e.g. "a.yml"
       # matching "ab.yml"). Wrapping with SEP on both sides + matching

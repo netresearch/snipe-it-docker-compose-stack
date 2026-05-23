@@ -30,6 +30,11 @@ cd "$(cd "$(dirname "$0")/.." && pwd)"
 # Validate KEY: shell-portable identifier, no spaces/quotes.
 [[ "$KEY" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "env-set: invalid KEY: $KEY" >&2; exit 1; }
 
+# Reject newlines in VALUE — a literal LF would inject a second key into
+# .env (the awk replacement only rewrites the first line, leaving the
+# tail of a multi-line value dangling as bareword lines).
+[[ "$VALUE" != *$'\n'* ]] || { echo "env-set: VALUE must not contain newlines" >&2; exit 1; }
+
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 

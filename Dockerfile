@@ -34,6 +34,12 @@ ARG SNIPE_IT_VERSION=v8.5.0
 # Default: false — produces deterministic, audit-friendly pinned images.
 ARG ROLLING_DEPS=false
 
+# Sentry-Laravel pin. Bumped deliberately to keep pinned image variants
+# bit-for-bit reproducible across rebuilds (a bare `^4` would resolve
+# whichever 4.x is current at build time, defeating the "pinned" promise).
+# Rolling-variant builds also use this version unless overridden.
+ARG SENTRY_LARAVEL_VERSION=4.25.1
+
 ENV COMPOSER_ALLOW_SUPERUSER=1 \
     COMPOSER_NO_INTERACTION=1 \
     COMPOSER_MEMORY_LIMIT=-1
@@ -101,7 +107,7 @@ RUN --mount=type=cache,target=/root/.composer/cache \
     # masking a real failure. \
     n=0; \
     until composer require --no-install --no-scripts --no-interaction \
-            sentry/sentry-laravel:^4; do \
+            "sentry/sentry-laravel:${SENTRY_LARAVEL_VERSION}"; do \
         n=$((n + 1)); \
         if [ "$n" -ge 5 ]; then \
             echo "[composer] require sentry/sentry-laravel failed after $n attempts" >&2; \

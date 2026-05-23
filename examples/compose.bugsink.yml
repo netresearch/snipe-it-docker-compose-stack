@@ -43,12 +43,34 @@
 #   BUGSINK_SECRET_KEY        # openssl rand -base64 50
 #   BUGSINK_ADMIN_EMAIL       # e.g. ops@example.com
 #   BUGSINK_ADMIN_PASSWORD    # initial admin password (rotate after login)
+#                             #   must NOT contain ':' — CREATE_SUPERUSER
+#                             #   uses 'email:password' as delimiter
+#                             #   AFTER rotating via UI, clear this var:
+#                             #     ./bin/env-set.sh BUGSINK_ADMIN_PASSWORD ""
 #
 # Optional:
-#   BUGSINK_BASE_URL          # public URL when behind a proxy; default
-#                             # http://bugsink:8000 (internal-only)
-#   BUGSINK_BEHIND_HTTPS_PROXY # "true" when fronted by Traefik/Caddy
-#                              # with TLS, default "false"
+#   BUGSINK_PUBLIC_URL        # external URL when fronted by a reverse
+#                             # proxy with TLS, e.g.
+#                             # https://bugsink.example.com — bugsink uses
+#                             # this in email links / UI canonical URLs.
+#                             # The DSN written for snipe-it ALWAYS uses
+#                             # the internal http://bugsink:8000 so the
+#                             # app/worker reach bugsink directly on the
+#                             # compose network.
+#   BUGSINK_BEHIND_HTTPS_PROXY # "true" ONLY when fronted by a proxy that
+#                              # STRIPS client-supplied X-Forwarded-*
+#                              # headers (Traefik does this by default;
+#                              # Caddy needs `trusted_proxies` configured).
+#                              # Default "false".
+
+# Re-declare the logging anchor — YAML anchors don't survive overlays, so
+# `*logging` from compose.yml isn't reachable here. Same defaults: bounded
+# json-file logs so a noisy Bugsink instance can't fill the host disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   bugsink:
@@ -56,6 +78,13 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     cpus: 1.0
+    logging: *logging
+    # Match the hardening posture of every other service in compose.yml.
+    # USER bugsink is baked into the image; no setuid happens at runtime,
+    # so we don't need CHOWN/SETUID/SETGID. Gunicorn binds port 8000
+    # (>1024) so CAP_NET_BIND_SERVICE isn't needed either.
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     environment:
       # SQLite path inside the data volume. Bugsink only enables SQLite
       # when DATABASE_URL is UNSET (any value falls back to DATABASE_URL
@@ -67,7 +96,13 @@ services:
       # superuser already exists). Rotate the password via the UI after
       # first login.
       CREATE_SUPERUSER: "${BUGSINK_ADMIN_EMAIL:?BUGSINK_ADMIN_EMAIL is required}:${BUGSINK_ADMIN_PASSWORD:?BUGSINK_ADMIN_PASSWORD is required}"
-      BASE_URL: "${BUGSINK_BASE_URL:-http://bugsink:8000}"
+      # BUGSINK_PUBLIC_URL is what Bugsink puts in email links / UI canonical
+      # URLs — set this to your reverse-proxied URL when fronting with Traefik
+      # or Caddy. The DSN written into /run/bugsink-dsn for snipe-it always
+      # uses the internal http://bugsink:8000 (see bugsink-init below) so
+      # snipe-it can reach Bugsink directly on the compose network without
+      # round-tripping through the proxy.
+      BASE_URL: "${BUGSINK_PUBLIC_URL:-http://bugsink:8000}"
       BEHIND_HTTPS_PROXY: "${BUGSINK_BEHIND_HTTPS_PROXY:-false}"
       PORT: "8000"
     volumes:
@@ -88,25 +123,46 @@ services:
   # user, then writes the project DSN into a shared volume that
   # snipe-it's `app` and `worker` services read via *_FILE.
   #
-  # Runs as root so it can initialize the fresh `bugsink-dsn` named
-  # volume (Docker creates volume mount points as root by default; the
-  # bugsink user otherwise can't write there on first bring-up). The
-  # SQLite DB itself was created by the bugsink web container (which
-  # we depend on being healthy first), so its WAL/SHM lock files
-  # already exist with the bugsink-user ownership SQLite expects.
+  # Runs as root because Docker creates fresh named-volume mount points
+  # with root ownership; the bugsink user (uid 14237) otherwise can't
+  # write to /dsn on first bring-up. Touching the SQLite DB as root is
+  # safe: SQLite's robust_chown (built in since 3.17.0; image ships
+  # 3.46.1) explicitly chowns any newly-created -wal/-shm files to match
+  # the existing DB file's owner. So even if init creates the WAL/SHM
+  # files (which only happens if bugsink-web hasn't already done a
+  # write), the bugsink-user web container can still write to them
+  # afterwards.
+  #
+  # cap_drop: [ALL] keeps the "root in a no-cap container" surface tiny
+  # — root in a no-cap container is essentially userspace-root and can't
+  # do much beyond filesystem ops on what's mounted.
   bugsink-init:
     image: bugsink/bugsink:2.2.1
     restart: "no"
     user: "0"
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *logging
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
     depends_on:
       bugsink:
         condition: service_healthy
     environment:
-      # MUST match the web container so the init script sees the same
-      # SQLite DB. Re-using the env-var defaults guarantees that.
+      # MUST match the web container's database location so the init
+      # script sees the same SQLite DB.
       DATABASE_PATH: "/data/bugsink.sqlite3"
       SECRET_KEY: "${BUGSINK_SECRET_KEY:?BUGSINK_SECRET_KEY is required}"
-      BASE_URL: "${BUGSINK_BASE_URL:-http://bugsink:8000}"
+      # ALWAYS the internal URL — the DSN must be reachable from snipe-it
+      # `app`/`worker` on the compose network. If we used BUGSINK_PUBLIC_URL
+      # (which an operator may set to https://bugsink.example.com behind a
+      # proxy), the DSN's host part would point outside the compose
+      # network and snipe-it couldn't reach it without round-tripping.
+      BASE_URL: "http://bugsink:8000"
+      # Used by the init script to pick the right superuser (operators
+      # may add more later via the UI; we must pin to the seeded admin).
+      BUGSINK_ADMIN_EMAIL: "${BUGSINK_ADMIN_EMAIL:?BUGSINK_ADMIN_EMAIL is required}"
     volumes:
       - bugsink-data:/data
       - bugsink-dsn:/dsn
@@ -122,14 +178,20 @@ services:
         set -eu
         echo "[bugsink-init] seeding snipe-it team + project"
         bugsink-manage shell -c "
+        import os
         from django.contrib.auth import get_user_model
         from teams.models import Team, TeamMembership, TeamRole
-        from projects.models import Project, ProjectMembership
+        from projects.models import Project, ProjectMembership, ProjectRole
 
         User = get_user_model()
-        admin = User.objects.filter(is_superuser=True).first()
+        admin_email = os.environ['BUGSINK_ADMIN_EMAIL']
+        admin = (User.objects.filter(email=admin_email)
+                              .order_by('pk').first()
+                 or User.objects.filter(is_superuser=True)
+                                .order_by('pk').first())
         if not admin:
-            raise SystemExit('No superuser found; CREATE_SUPERUSER did not seed admin')
+            raise SystemExit(
+                'No superuser found; CREATE_SUPERUSER did not seed admin')
 
         team, _ = Team.objects.get_or_create(name='snipe-it')
         TeamMembership.objects.get_or_create(
@@ -140,11 +202,13 @@ services:
             slug='snipe-it',
             defaults={'name': 'snipe-it', 'team': team},
         )
-        ProjectMembership.objects.get_or_create(project=project, user=admin)
+        ProjectMembership.objects.get_or_create(
+            project=project, user=admin,
+            defaults={'role': ProjectRole.ADMIN, 'accepted': True},
+        )
 
         with open('/dsn/snipe-it.dsn', 'w') as f:
             f.write(project.dsn)
-        import os
         os.chmod('/dsn/snipe-it.dsn', 0o444)
         print('DSN written to /dsn/snipe-it.dsn')
         "
@@ -190,5 +254,8 @@ volumes:
     # SQLite database + Bugsink's local object storage. Back this up
     # alongside the snipe-it app-data volume.
   bugsink-dsn:
-    # Shared file-secret volume — bugsink-init writes the DSN here,
-    # snipe-it app + worker read it. Single tiny text file.
+    # Shared file-secret volume — bugsink-init writes the DSN here as
+    # root (see the bugsink-init service block for why), snipe-it app +
+    # worker read it via the read-only mount + entrypoint *_FILE shim.
+    # Single tiny text file; persists across stack restarts so app/worker
+    # can start before bugsink-init has re-run.
