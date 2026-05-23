@@ -80,6 +80,11 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/snipe-it-php-fpm:latest
           cache-from: type=gha,scope=smoke-test
           cache-to: type=gha,scope=smoke-test,mode=max
+          # Authenticated github.com access during composer require. Same
+          # security model as .github/workflows/build.yml — withheld from
+          # fork PRs to prevent token exfiltration via Dockerfile edits.
+          secrets: |
+            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
       - name: Bootstrap .env
         run: |
           cp .env.example .env
@@ -133,6 +138,10 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/snipe-it-php-fpm:latest
           cache-from: type=gha,scope=smoke-test
+          # Authenticated github.com access during composer require. Same
+          # security model as build.yml — withheld from fork PRs.
+          secrets: |
+            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
       - name: First run
         run: ./bin/init.sh
       - name: Snapshot .env

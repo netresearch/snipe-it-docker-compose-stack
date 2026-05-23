@@ -93,8 +93,24 @@ RUN --mount=type=cache,target=/root/.composer/cache \
     # controlled at runtime by SENTRY_LARAVEL_DSN — empty = silently \
     # disabled, set = enabled. Compatible with Bugsink (self-hosted, \
     # Sentry-protocol-compatible) using the same DSN format. \
-    composer require --no-install --no-scripts --no-interaction \
-        sentry/sentry-laravel:^4 \
+    # \
+    # Retry loop: PR-event builds run anonymously against github.com \
+    # (60 req/h cap, see .github/workflows/build.yml's secrets block) \
+    # and dep resolution is fan-out-y. Five attempts with linear backoff \
+    # absorb the occasional transient 401/rate-limit blip without \
+    # masking a real failure. \
+    n=0; \
+    until composer require --no-install --no-scripts --no-interaction \
+            sentry/sentry-laravel:^4; do \
+        n=$((n + 1)); \
+        if [ "$n" -ge 5 ]; then \
+            echo "[composer] require sentry/sentry-laravel failed after $n attempts" >&2; \
+            exit 1; \
+        fi; \
+        sleep_s=$((n * 10)); \
+        echo "[composer] require attempt $n failed, retrying in ${sleep_s}s"; \
+        sleep "$sleep_s"; \
+    done \
     && if [ "${ROLLING_DEPS}" = "true" ]; then \
         echo "[rolling-variant] deleting composer.lock to resolve fresh deps"; \
         rm -f composer.lock; \
