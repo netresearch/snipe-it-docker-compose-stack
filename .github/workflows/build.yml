@@ -576,7 +576,13 @@ jobs:
           # Build the -t flag list from metadata-action's tag output
           # (JSON array under .tags). Build the per-arch source-image
           # arguments from the digest files dropped by the build jobs.
-          mapfile -t TAG_FLAGS < <(jq -r '.tags[] | "-t \(.)"' <<<"$METADATA_JSON")
+          # Use --tag=<value> (single argv token) instead of `-t <value>`
+          # (two tokens). The previous mapfile-with-"-t X" produced
+          # array elements that were one space-containing string, which
+          # `${TAG_FLAGS[@]}` then passed as a single argv to buildx —
+          # docker would see one arg `-t ghcr.io/...:8.5.0` and fail
+          # flag parsing. The =-form sidesteps that entirely.
+          mapfile -t TAG_FLAGS < <(jq -r '.tags[] | "--tag=\(.)"' <<<"$METADATA_JSON")
           mapfile -t SRC_REFS < <(
             find /tmp/digests -maxdepth 1 -type f -printf "${IMAGE}@sha256:%f\n"
           )
