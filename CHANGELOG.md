@@ -10,8 +10,8 @@ version tracks the upstream Snipe-IT release plus a date stamp.
 ## [Unreleased]
 
 ### Security
-- **Dropped the `SESSION_SECURE_COOKIE` → `SECURE_COOKIES` backward-
-  compatibility fallback in `compose.yml`** (issue #28). The chained
+- **Dropped the `SESSION_SECURE_COOKIE` → `SECURE_COOKIES`
+  backward-compatibility fallback in `compose.yml`** (issue #28). The chained
   default `${SECURE_COOKIES:-${SESSION_SECURE_COOKIE:-true}}` introduced
   in PR #22 could silently disable secure cookies for any operator who
   had `SESSION_SECURE_COOKIE=false` in `.env` carried over from earlier
