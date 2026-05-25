@@ -93,13 +93,15 @@ setup() {
 }
 
 @test "compose-file add: rejects path outside examples/compose.*.yml (absolute)" {
-  : > /tmp/x.yml
-  run ./bin/compose-file.sh add /tmp/x.yml
+  # $BATS_TEST_TMPDIR is an absolute path, so this still verifies the
+  # absolute-path rejection. Avoids /tmp permission/collision concerns.
+  local external_file="$BATS_TEST_TMPDIR/external.yml"
+  : > "$external_file"
+  run ./bin/compose-file.sh add "$external_file"
   [ "$status" -eq 1 ]
   [[ "$output" == *"only examples/compose.*.yml paths are allowed"* ]]
   # .env was not mutated.
   ! grep -q '^COMPOSE_FILE=' .env
-  rm -f /tmp/x.yml
 }
 
 @test "compose-file add: rejects path-traversal style argument" {

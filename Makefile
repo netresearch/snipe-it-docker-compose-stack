@@ -120,7 +120,7 @@ test-snipeit: ## Build tester stage — runs Snipe-IT's own phpunit suite, fails
 	docker buildx build --target tester --platform linux/amd64 .
 
 test-bats: ## Run bats regression suite for bin/ helpers (uses bats/bats Docker image — no local install)
-	docker run --rm -v $(CURDIR):/code -w /code bats/bats:latest tests/bin/
+	docker run --rm -v "$(CURDIR)":/code -w /code bats/bats:latest tests/bin/
 
 # ────────────────────────────────────────────────────────────────────
 # Dev convenience
