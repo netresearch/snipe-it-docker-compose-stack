@@ -23,6 +23,10 @@
 #   - yamllint         → stays inline. The repo has no .yamllint.yml config
 #                        file; rules are passed via config_data here to keep
 #                        the contract local.
+#   - bats             → regression suite for bin/env-set.sh +
+#                        bin/compose-file.sh under tests/bin/. Uses
+#                        bats-core/bats-action to install bats + bats-support
+#                        + bats-assert on the runner; failures block PRs.
 
 name: lint
 
@@ -118,3 +122,20 @@ jobs:
                 check-keys: false
               comments:
                 min-spaces-from-content: 1
+
+  bats:
+    name: bats tests/bin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      # Installs bats, bats-support, bats-assert under /usr/lib/bats-*.
+      # tests/bin/test_helper.bash sources support+assert from that path.
+      - uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # v4.0.0
+        with:
+          # detik + file are kubernetes/filesystem helpers we don't use.
+          detik-install: false
+          file-install: false
+      - name: Run regression suite
+        run: bats tests/bin/
