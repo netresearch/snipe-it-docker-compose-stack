@@ -157,6 +157,9 @@ For public deployments, set `APP_URL` in `.env` (no trailing slash) AFTER `make 
 | On-demand backup | `make backup` (ofelia auto-runs nightly at 03:00) |
 | Pull + recreate + tail | `make upgrade` |
 | Show enabled overlays | `make overlays` |
+| Enable an overlay | `make enable-traefik` / `make enable-caddy` / `make enable-observability` / `make enable-bugsink` |
+| Disable an overlay | `make disable-traefik` / `make disable-caddy` / `make disable-observability` / `make disable-bugsink` |
+| Wire external Sentry/Bugsink | `make enable-sentry DSN=https://...` / `make disable-sentry` |
 
 `make help` is the canonical, always-current list.
 

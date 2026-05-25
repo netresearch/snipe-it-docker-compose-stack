@@ -70,6 +70,27 @@ enable-sentry: .env ## Point error tracking at an external Sentry/Bugsink DSN. U
 disable-sentry: .env ## Clear SENTRY_LARAVEL_DSN (turns external error reporting off)
 	@./bin/env-set.sh SENTRY_LARAVEL_DSN ""
 
+enable-traefik: .env ## Add Traefik reverse-proxy overlay (TLS termination + label-based routing)
+	@./bin/compose-file.sh add examples/compose.traefik.yml
+	@printf '\033[1;34m[next]\033[0m Set SNIPEIT_HOST in .env to your public hostname (e.g. snipeit.example.com), then `make up`. Requires an existing `traefik` external network.\n'
+
+disable-traefik: .env ## Remove Traefik overlay
+	@./bin/compose-file.sh remove examples/compose.traefik.yml
+
+enable-caddy: .env ## Add Caddy reverse-proxy overlay (TLS termination + auto-HTTPS)
+	@./bin/compose-file.sh add examples/compose.caddy.yml
+	@printf '\033[1;34m[next]\033[0m Set SNIPEIT_HOST in .env to your public hostname (e.g. snipeit.example.com), then `make up`.\n'
+
+disable-caddy: .env ## Remove Caddy overlay
+	@./bin/compose-file.sh remove examples/compose.caddy.yml
+
+enable-observability: .env ## Add Prometheus + exporters overlay (php-fpm + nginx metrics)
+	@./bin/compose-file.sh add examples/compose.observability.yml
+	@printf '\033[1;34m[next]\033[0m The nginx /stub_status endpoint is NOT enabled by default — see the overlay header for the two opt-in paths.\n'
+
+disable-observability: .env ## Remove observability overlay
+	@./bin/compose-file.sh remove examples/compose.observability.yml
+
 # ────────────────────────────────────────────────────────────────────
 # Backup / restore
 # ────────────────────────────────────────────────────────────────────
@@ -191,4 +212,15 @@ clean: ## DESTRUCTIVE: down + delete ALL volumes (db + uploads + backups)
 	  [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
 	docker compose down -v
 
-.PHONY: help init up down restart logs logs-app ps backup backup-list backup-verify health test-image test-snipeit dev build lint pull upgrade shell artisan tinker restore clean overlays enable-bugsink disable-bugsink enable-sentry disable-sentry
+.PHONY: \
+	help init up down restart logs logs-app ps \
+	backup backup-list backup-verify \
+	health test-image test-snipeit \
+	dev build lint pull upgrade \
+	shell artisan tinker restore clean \
+	overlays \
+	enable-bugsink disable-bugsink \
+	enable-sentry disable-sentry \
+	enable-traefik disable-traefik \
+	enable-caddy disable-caddy \
+	enable-observability disable-observability
