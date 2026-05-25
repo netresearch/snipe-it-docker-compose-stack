@@ -213,7 +213,7 @@ jobs:
           tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
           labels: |
             org.opencontainers.image.title=snipe-it-php-fpm
-            org.opencontainers.image.description=Hardened Snipe-IT ${{ inputs.ref }} on PHP 8.5 / Alpine
+            org.opencontainers.image.description=Hardened Snipe-IT ${{ inputs.version }} on PHP 8.5 / Alpine
             org.opencontainers.image.version=${{ inputs.version }}
             org.opencontainers.image.created=${{ inputs.build_date }}
             org.opencontainers.image.revision=${{ github.sha }}

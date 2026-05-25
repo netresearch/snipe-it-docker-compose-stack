@@ -166,6 +166,13 @@ jobs:
           # run (or `dispatch track=tag`) would needlessly fail the whole
           # workflow — including the canonical tag/pinned release build,
           # which makes zero API calls of its own.
+          # Returns two lines: the FULL commit SHA, then the version
+          # string. The full SHA becomes the build ref (Dockerfile
+          # build-arg) so the codeload tarball is pinned to an immutable
+          # commit — both per-arch builds fetch the exact same source,
+          # and it can't drift from the SHA embedded in the version tag.
+          # The branch name survives only in tags_extra (for the moving
+          # `master` / `develop` / `nightly` tags).
           resolve_branch() {
             local branch="$1"
             local sha
@@ -174,12 +181,22 @@ jobs:
               echo "error: could not resolve SHA for grokability/snipe-it@${branch}" >&2
               return 1
             fi
-            echo "${branch}-${DATE_TAG}-${sha:0:7}"
+            printf '%s\n%s\n' "$sha" "${branch}-${DATE_TAG}-${sha:0:7}"
           }
+          MASTER_REF=""
           MASTER_VERSION=""
+          DEVELOP_REF=""
           DEVELOP_VERSION=""
-          tracks_has master  && MASTER_VERSION=$(resolve_branch master)
-          tracks_has develop && DEVELOP_VERSION=$(resolve_branch develop)
+          if tracks_has master; then
+            master_out=$(resolve_branch master) || exit 1
+            MASTER_REF=$(printf '%s\n' "$master_out" | sed -n 1p)
+            MASTER_VERSION=$(printf '%s\n' "$master_out" | sed -n 2p)
+          fi
+          if tracks_has develop; then
+            develop_out=$(resolve_branch develop) || exit 1
+            DEVELOP_REF=$(printf '%s\n' "$develop_out" | sed -n 1p)
+            DEVELOP_VERSION=$(printf '%s\n' "$develop_out" | sed -n 2p)
+          fi
 
           # Build per-track facts JSON for jq to consume below.
           PER_TRACK=$(jq -n \
@@ -187,7 +204,9 @@ jobs:
               --arg tag_version     "$TAG_VERSION" \
               --arg tag_major       "$TAG_MAJOR" \
               --arg tag_major_minor "$TAG_MAJOR_MINOR" \
+              --arg master_ref      "$MASTER_REF" \
               --arg master_version  "$MASTER_VERSION" \
+              --arg develop_ref     "$DEVELOP_REF" \
               --arg develop_version "$DEVELOP_VERSION" \
               '{
                 tag: {
@@ -201,7 +220,7 @@ jobs:
                 master: {
                   ref_source: "master",
                   tags_extra: "master",
-                  ref:         "master",
+                  ref:         $master_ref,
                   version:     $master_version,
                   major:       "",
                   major_minor: ""
@@ -209,7 +228,7 @@ jobs:
                 develop: {
                   ref_source: "develop",
                   tags_extra: "develop,nightly",
-                  ref:         "develop",
+                  ref:         $develop_ref,
                   version:     $develop_version,
                   major:       "",
                   major_minor: ""
