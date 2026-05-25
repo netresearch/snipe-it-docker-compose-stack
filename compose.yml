@@ -70,13 +70,15 @@ x-app-env: &app-env
   LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
   LOG_STDERR_FORMATTER: ${LOG_STDERR_FORMATTER:-Monolog\Formatter\JsonFormatter}
   # Secure session cookie ON by default. Override to false ONLY in dev
-  # where you serve plain HTTP locally. Snipe-IT reads this as
-  # `SECURE_COOKIES` (config/session.php uses env('SECURE_COOKIES')),
-  # NOT the more Laravel-conventional `SESSION_SECURE_COOKIE`.
-  # BC fallback: SESSION_SECURE_COOKIE was a documented (but no-op) var
-  # in earlier revisions — honour the operator's intent if they have it
-  # set in .env even though Snipe-IT never read it directly.
-  SECURE_COOKIES: ${SECURE_COOKIES:-${SESSION_SECURE_COOKIE:-true}}
+  # where you serve plain HTTP locally.
+  #
+  # Snipe-IT reads this variable as SECURE_COOKIES (not the more
+  # Laravel-conventional SESSION_SECURE_COOKIE). The fallback chain
+  # is deliberately NOT extended to SESSION_SECURE_COOKIE — that would
+  # let an operator who explicitly set SESSION_SECURE_COOKIE=false in
+  # .env (when the variable was still a no-op) silently disable secure
+  # cookies. Operators must rename the variable in .env themselves.
+  SECURE_COOKIES: ${SECURE_COOKIES:-true}
   DB_CONNECTION: mysql
   DB_HOST: db
   DB_PORT: 3306
