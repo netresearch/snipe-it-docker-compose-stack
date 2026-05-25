@@ -135,20 +135,9 @@ jobs:
           TAG_MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
           TAG_MAJOR_MINOR=$(echo "$TAG_VERSION" | cut -d. -f1-2)
 
-          # master / develop tracks — single API call each, used by
-          # both build and merge so per-cell dereferences can't drift.
-          resolve_branch() {
-            local branch="$1"
-            local sha
-            sha=$(gh api "repos/grokability/snipe-it/commits/${branch}" --jq '.sha')
-            echo "${branch}-${DATE_TAG}-${sha:0:7}"
-          }
-          MASTER_VERSION=$(resolve_branch master)
-          DEVELOP_VERSION=$(resolve_branch develop)
-
           # ─ Active-cell matrix ───────────────────────────────────────
-          # Filter applied here, upstream of the `cell` matrix, so
-          # excluded cells never spawn:
+          # Determine the active tracks FIRST, so the upstream-SHA API
+          # calls below only run for tracks we'll actually build:
           #   * PR event           → only `tag` track
           #   * dispatch.track set → only that track
           #   * tag/rolling        → excluded (symfony/dom-crawler
@@ -163,6 +152,34 @@ jobs:
               && [ "$INPUT_TRACK" != "all" ]; then
             TRACKS=("$INPUT_TRACK")
           fi
+
+          tracks_has() {
+            local needle="$1" t
+            for t in "${TRACKS[@]}"; do [ "$t" = "$needle" ] && return 0; done
+            return 1
+          }
+
+          # master / develop tracks — single API call each, used by both
+          # build and merge so per-cell dereferences can't drift. Only
+          # resolve a branch's SHA when that track is actually active:
+          # otherwise a transient grokability API blip on a tag-only PR
+          # run (or `dispatch track=tag`) would needlessly fail the whole
+          # workflow — including the canonical tag/pinned release build,
+          # which makes zero API calls of its own.
+          resolve_branch() {
+            local branch="$1"
+            local sha
+            sha=$(gh api "repos/grokability/snipe-it/commits/${branch}" --jq '.sha')
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+              echo "error: could not resolve SHA for grokability/snipe-it@${branch}" >&2
+              return 1
+            fi
+            echo "${branch}-${DATE_TAG}-${sha:0:7}"
+          }
+          MASTER_VERSION=""
+          DEVELOP_VERSION=""
+          tracks_has master  && MASTER_VERSION=$(resolve_branch master)
+          tracks_has develop && DEVELOP_VERSION=$(resolve_branch develop)
 
           # Build per-track facts JSON for jq to consume below.
           PER_TRACK=$(jq -n \
