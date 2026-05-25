@@ -605,10 +605,25 @@ jobs:
           # avoids an extra registry round-trip + the eventual-consistency
           # race where the just-pushed manifest may not yet be readable.
           # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+          #
+          # NOTE on the jq path: `docker/build-push-action` writes
+          # `containerimage.digest` (flat). `docker buildx imagetools
+          # create --metadata-file` writes `containerimage.descriptor.digest`
+          # (nested). PR #27 used the flat key by mistake — jq returned
+          # null, the empty-digest guard below tripped with "failed to
+          # capture manifest digest from buildx --metadata-file", and
+          # every merge cell on main exited 1 (the per-arch count guard
+          # above was NOT involved — both arches built successfully).
+          # The // fallback covers both schemas in case buildx ever
+          # changes back.
           docker buildx imagetools create \
               --metadata-file /tmp/manifest-metadata.json \
               "${TAG_FLAGS[@]}" "${SRC_REFS[@]}"
-          MANIFEST_DIGEST=$(jq -r '."containerimage.digest"' /tmp/manifest-metadata.json)
+          MANIFEST_DIGEST=$(jq -r '
+              ."containerimage.descriptor".digest //
+              ."containerimage.digest" //
+              empty
+          ' /tmp/manifest-metadata.json)
           if [ -z "$MANIFEST_DIGEST" ] || [ "$MANIFEST_DIGEST" = "null" ]; then
             echo "ERROR: failed to capture manifest digest from buildx --metadata-file" >&2
             cat /tmp/manifest-metadata.json >&2
