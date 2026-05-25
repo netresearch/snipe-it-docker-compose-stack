@@ -45,6 +45,7 @@ current="$(awk '/^[[:space:]]*COMPOSE_FILE[[:space:]]*=/ {
 case "$current" in
   '"'*'"') current="${current#\"}"; current="${current%\"}" ;;
   "'"*"'") current="${current#\'}"; current="${current%\'}" ;;
+  *) ;;  # bare/unquoted — pass through unchanged
 esac
 [[ -z "$current" ]] && current="$BASE"
 
@@ -101,6 +102,14 @@ case "$action" in
         printf '\033[1;33m[compose-file]\033[0m - %s\n' "$p"
       fi
     done
+    ;;
+  *)
+    # Unreachable — the action-validating case at top of this script
+    # already rejects anything outside add|remove|list. Belt-and-suspenders
+    # default arm for SonarCloud's shelldre:S131 (defense-in-depth in
+    # case the upstream validation is ever weakened).
+    echo "compose-file: internal error — unhandled action '$action'" >&2
+    exit 1
     ;;
 esac
 
