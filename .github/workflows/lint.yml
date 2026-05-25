@@ -79,10 +79,22 @@ jobs:
         run: |
           set -eu
           YQ_VERSION=v4.53.2
-          sudo curl -fsSL \
+          # SHA256 of yq_linux_amd64 v4.53.2 (verified manually 2026-05-25
+          # via sha256sum on the published binary; mikefarah/yq's published
+          # `checksums` file mixes algorithms in a single column so we can't
+          # parse it programmatically here).
+          YQ_SHA256=d56bf5c6819e8e696340c312bd70f849dc1678a7cda9c2ad63eebd906371d56b
+          tmp=$(mktemp)
+          curl -fsSL \
             "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
-            -o /usr/local/bin/yq
-          sudo chmod +x /usr/local/bin/yq
+            -o "$tmp"
+          actual=$(sha256sum "$tmp" | awk '{print $1}')
+          if [ "$actual" != "$YQ_SHA256" ]; then
+            echo "yq checksum mismatch: expected $YQ_SHA256, got $actual" >&2
+            exit 1
+          fi
+          sudo install -m 0755 "$tmp" /usr/local/bin/yq
+          rm -f "$tmp"
           yq --version
       - name: Check overlay hardening
         run: ./tests/lint/hardening-check.sh

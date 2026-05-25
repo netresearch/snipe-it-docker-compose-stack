@@ -73,7 +73,9 @@ fi
 # Build the env-file. Every ${VAR:?...} reference across the base + overlays
 # needs a value or `docker compose config` rejects the merge. Generate a
 # throwaway file under TMPDIR so we never write into the working tree.
-ENV_FILE=$(mktemp -t hardening-check-env.XXXXXX)
+# `mktemp -t` is not portable between GNU and BSD/macOS — use a full
+# template instead so the script runs the same on both.
+ENV_FILE=$(mktemp "${TMPDIR:-/tmp}/hardening-check-env.XXXXXX")
 trap 'rm -f "${ENV_FILE}"' EXIT
 
 cat > "${ENV_FILE}" <<'EOF'
@@ -124,14 +126,23 @@ service_report() {
 
 # Pre-compute the base-only service set once so we can detect what each
 # overlay newly introduces (vs. merely modifies).
+# Capture into a variable BEFORE the while-read instead of feeding via
+# `done < <(...)` — process substitution runs in a subshell whose exit
+# code is invisible to `set -e`, so a failed `service_report` would
+# silently produce an empty loop. With `<<<` heredoc string + an explicit
+# capture, any non-zero from service_report fails the script here.
+if ! base_report=$(service_report "${BASE_COMPOSE}"); then
+  echo "error: failed to read services from ${BASE_COMPOSE}" >&2
+  exit 2
+fi
 declare -A is_base=()
 while IFS=$'\t' read -r name _restart _nnp _capdrop; do
   [[ -z "${name}" ]] && continue
   is_base["${name}"]=1
-done < <(service_report "${BASE_COMPOSE}")
+done <<< "${base_report}"
 
 if (( ${#is_base[@]} == 0 )); then
-  echo "error: failed to read services from ${BASE_COMPOSE}" >&2
+  echo "error: base compose has no services (or yq filter returned empty)" >&2
   exit 2
 fi
 
@@ -147,6 +158,13 @@ for overlay in "${overlays[@]}"; do
   echo "==> checking ${rel_overlay}"
 
   introduced_count=0
+
+  # Same reason as the base-report capture above — make service_report
+  # failures fail the script visibly instead of producing an empty loop.
+  if ! overlay_report=$(service_report "${BASE_COMPOSE}" "${overlay}"); then
+    echo "error: failed to merge ${overlay} with ${BASE_COMPOSE}" >&2
+    exit 2
+  fi
 
   while IFS=$'\t' read -r name restart has_nnp has_capdrop_all; do
     [[ -z "${name}" ]] && continue
@@ -184,7 +202,7 @@ for overlay in "${overlays[@]}"; do
     done
     echo "    FAIL: ${name}: missing ${reason}" >&2
     offender_count=$((offender_count + 1))
-  done < <(service_report "${BASE_COMPOSE}" "${overlay}")
+  done <<< "${overlay_report}"
 
   if (( introduced_count == 0 )); then
     echo "    no new services introduced — nothing to check"
