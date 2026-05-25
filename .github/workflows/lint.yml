@@ -13,6 +13,13 @@
 #   - compose-validate → stays inline. Validates docker compose config with
 #                        repo-specific .env.example placeholder substitution
 #                        (caller-specific shape that doesn't generalise).
+#   - overlay-hardening → stays inline. Calls tests/lint/hardening-check.sh
+#                        to enforce security_opt:[no-new-privileges:true] +
+#                        cap_drop:[ALL] on every long-running service that
+#                        an examples/compose.*.yml overlay introduces.
+#                        Background: PR #21's audit caught the Bugsink
+#                        overlay initially shipping without hardening
+#                        because compose anchors don't survive overlays.
 #   - yamllint         → stays inline. The repo has no .yamllint.yml config
 #                        file; rules are passed via config_data here to keep
 #                        the contract local.
@@ -56,6 +63,29 @@ jobs:
             .env
           docker compose config --quiet
           docker compose -f compose.yml config --quiet
+
+  overlay-hardening:
+    name: overlay hardening
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install yq (mikefarah)
+        # The ubuntu-latest runner already has docker compose v2; some images
+        # also ship a yq, but version + flavour (mikefarah vs kislyuk) vary.
+        # Pin a specific mikefarah release for reproducibility — the script
+        # only uses portable v4 syntax (// fallback, @tsv, map/any).
+        run: |
+          set -eu
+          YQ_VERSION=v4.53.2
+          sudo curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+      - name: Check overlay hardening
+        run: ./tests/lint/hardening-check.sh
 
   yamllint:
     name: yamllint
