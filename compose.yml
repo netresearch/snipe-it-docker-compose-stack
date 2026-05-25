@@ -73,10 +73,15 @@ x-app-env: &app-env
   # where you serve plain HTTP locally. Snipe-IT reads this as
   # `SECURE_COOKIES` (config/session.php uses env('SECURE_COOKIES')),
   # NOT the more Laravel-conventional `SESSION_SECURE_COOKIE`.
-  # BC fallback: SESSION_SECURE_COOKIE was a documented (but no-op) var
-  # in earlier revisions — honour the operator's intent if they have it
-  # set in .env even though Snipe-IT never read it directly.
-  SECURE_COOKIES: ${SECURE_COOKIES:-${SESSION_SECURE_COOKIE:-true}}
+  #
+  # No BC fallback to SESSION_SECURE_COOKIE: PR #22 originally chained
+  # `${SECURE_COOKIES:-${SESSION_SECURE_COOKIE:-true}}` to honour the
+  # operator's intent, but that's a security regression — operators
+  # who had SESSION_SECURE_COOKIE=false in .env (it was a no-op then,
+  # since Snipe-IT never read it) would now silently lose secure
+  # cookies. See issue #28. Operators that ever set
+  # SESSION_SECURE_COOKIE must rename it to SECURE_COOKIES explicitly.
+  SECURE_COOKIES: ${SECURE_COOKIES:-true}
   DB_CONNECTION: mysql
   DB_HOST: db
   DB_PORT: 3306

@@ -9,6 +9,18 @@ version tracks the upstream Snipe-IT release plus a date stamp.
 
 ## [Unreleased]
 
+### Security
+- **Dropped the `SESSION_SECURE_COOKIE` → `SECURE_COOKIES` backward-
+  compatibility fallback in `compose.yml`** (issue #28). The chained
+  default `${SECURE_COOKIES:-${SESSION_SECURE_COOKIE:-true}}` introduced
+  in PR #22 could silently disable secure cookies for any operator who
+  had `SESSION_SECURE_COOKIE=false` in `.env` carried over from earlier
+  docs (it was a no-op then because Snipe-IT never read that variable).
+  After this change, the default is back to plain `${SECURE_COOKIES:-true}`
+  — operators who ever set `SESSION_SECURE_COOKIE` in `.env` must rename
+  it to `SECURE_COOKIES` explicitly. Flagged by independent security
+  audit during PR #27 review.
+
 ### Changed
 - License: split AGPL-3.0 (initial) → MIT for code/configs + CC-BY-SA-4.0 for
   prose. AGPL was wrong here — this repo is a deployment template, not a
