@@ -46,62 +46,195 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
-  build:
-    name: build (${{ matrix.track.name }}/${{ matrix.composer }}/${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    # Rolling variants resolve composer deps fresh against composer.json
-    # ranges, so they fail whenever upstream Snipe-IT's constraints
-    # reference a major that's now under a composer audit advisory
-    # (e.g. symfony/dom-crawler ^4.4 → PKSA-5r1g-c7b7-y1zg). This is the
-    # rolling variant working as designed; don't let it block the pinned
-    # variants which ARE the canonical release artefacts.
-    continue-on-error: ${{ matrix.composer == 'rolling' }}
+  # ─ Resolve refs / versions / matrix once, upstream of everything ────────
+  # Single source of truth for:
+  #   * `master` / `develop` SHAs at api.github.com (eliminates the TOCTOU
+  #     where the original `merge` job re-resolved 12 min after `build`
+  #     did — if upstream advanced in between, the manifest got tagged
+  #     with the new SHA but the digest came from the old SHA's build).
+  #   * `date_tag` / `build_date` — pinned once so the same logical run
+  #     can't straddle a UTC-midnight boundary and produce two different
+  #     dated tags between build and merge.
+  #   * The active-cell matrix — encodes the event-driven filtering
+  #     (PR → tag-only, workflow_dispatch.track override) UPSTREAM so the
+  #     orchestrator's `cell` matrix never spawns skipped jobs.
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        track:
-          # ─ stable release line — reads .snipe-it-version (Renovate-managed) ─
-          # YAML anchor lets the matrix.exclude entry reference this exact
-          # object, so adding/changing a field here automatically keeps the
-          # exclude in sync. Without the anchor, the exclude block had to
-          # repeat all 3 properties verbatim and would silently stop
-          # excluding the intended cell if any of them drifted. Bot-reviewer-
-          # flagged on PR netresearch/snipe-it-docker-compose-stack#15.
-          - &tag-track
-            name: tag
-            ref_source: file       # build.yml will read .snipe-it-version
-            tags_extra: ''         # plus the auto-generated 8.5.0 / 8.5 / 8 / latest tags
-          # ─ branch tracker: master (= last released code, may include
-          #   post-release commits) ─
-          - name: master
-            ref_source: master
-            tags_extra: 'master'
-          # ─ branch tracker: develop (= active dev branch, pre-release) ─
-          - name: develop
-            ref_source: develop
-            tags_extra: 'develop,nightly'
-        composer:
-          # `pinned`  — Snipe-IT's shipped composer.lock honored (reproducible)
-          # `rolling` — composer.lock deleted before install (catches transitive CVEs)
-          - pinned
-          - rolling
-        platform:
-          # Native runners per arch — no QEMU emulation. amd64 builds
-          # on ubuntu-latest (~12 min), arm64 on ubuntu-24.04-arm (~12
-          # min, in parallel). Previous arrangement was QEMU-emulated
-          # arm64 on ubuntu-latest, adding ~25 min per cell. The merge
-          # job below joins the two per-arch digests into a single
-          # multi-arch manifest list per (track, composer) cell.
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-        exclude:
+    outputs:
+      # Shared facts.
+      date_tag: ${{ steps.r.outputs.date_tag }}
+      build_date: ${{ steps.r.outputs.build_date }}
+      is_release_from_file: ${{ steps.r.outputs.is_release_from_file }}
+      is_main_ref: ${{ steps.r.outputs.is_main_ref }}
+      fork_pr: ${{ steps.r.outputs.fork_pr }}
+      push_artifacts: ${{ steps.r.outputs.push_artifacts }}
+      # Registry + image name — passed through resolve because the
+      # reusable-workflow `with:` block can't reference the workflow's
+      # `env:` context (only github / inputs / matrix / needs / strategy /
+      # vars are allowed there).
+      registry: ${{ steps.r.outputs.registry }}
+      image_name: ${{ steps.r.outputs.image_name }}
+      # JSON cell matrix consumed by the `cell` job below — already
+      # filtered for the current event (PR → tag-only, dispatch.track,
+      # tag/rolling exclude). One include row per active (track,
+      # composer) cell, with all per-cell facts pre-populated so
+      # _build-cell.yml inputs are just `${{ matrix.<field> }}`.
+      cell-matrix: ${{ steps.r.outputs.cell-matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve refs, versions, and active-cell matrix
+        id: r
+        env:
+          # All ${{ ... }} interpolation goes through env vars rather than
+          # directly into the run-script body — sonarcloud rule
+          # githubactions:S7630 (shell injection). Especially important
+          # for INPUT_VERSION which is user-supplied via workflow_dispatch.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.snipe_it_version }}
+          INPUT_TRACK: ${{ inputs.track }}
+          EVENT: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO_FULL_NAME: ${{ github.repository }}
+          REF_FULL: ${{ github.ref }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+
+          # ─ Shared facts ─────────────────────────────────────────────
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          DATE_TAG=$(date -u +'%Y%m%d')
+          IS_MAIN_REF=false
+          [ "$REF_FULL" = "refs/heads/main" ] && IS_MAIN_REF=true
+          IS_RELEASE_FROM_FILE=false
+          [ -z "$INPUT_VERSION" ] && IS_RELEASE_FROM_FILE=true
+          FORK_PR=false
+          if [ "$EVENT" = "pull_request" ] \
+              && [ -n "$PR_HEAD_REPO" ] \
+              && [ "$PR_HEAD_REPO" != "$REPO_FULL_NAME" ]; then
+            FORK_PR=true
+          fi
+          PUSH_ARTIFACTS=true
+          [ "$EVENT" = "pull_request" ] && PUSH_ARTIFACTS=false
+
+          # ─ Per-track resolution ─────────────────────────────────────
+          # tag track
+          if [ -n "$INPUT_VERSION" ]; then
+            TAG_REF="$INPUT_VERSION"
+          else
+            TAG_REF=$(tr -d '[:space:]' < .snipe-it-version)
+          fi
+          TAG_VERSION="${TAG_REF#v}"
+          TAG_MAJOR=$(echo "$TAG_VERSION" | cut -d. -f1)
+          TAG_MAJOR_MINOR=$(echo "$TAG_VERSION" | cut -d. -f1-2)
+
+          # ─ Active-cell matrix ───────────────────────────────────────
+          # Determine the active tracks FIRST, so the upstream-SHA API
+          # calls below only run for tracks we'll actually build:
+          #   * PR event           → only `tag` track
+          #   * dispatch.track set → only that track
+          #   * tag/rolling        → excluded (symfony/dom-crawler
+          #                          PKSA-5r1g-c7b7-y1zg, see notes
+          #                          below)
+          # All other (track, composer) combinations are active.
+          TRACKS=(tag master develop)
+          if [ "$EVENT" = "pull_request" ]; then
+            TRACKS=(tag)
+          elif [ "$EVENT" = "workflow_dispatch" ] \
+              && [ -n "$INPUT_TRACK" ] \
+              && [ "$INPUT_TRACK" != "all" ]; then
+            TRACKS=("$INPUT_TRACK")
+          fi
+
+          tracks_has() {
+            local needle="$1" t
+            for t in "${TRACKS[@]}"; do [ "$t" = "$needle" ] && return 0; done
+            return 1
+          }
+
+          # master / develop tracks — single API call each, used by both
+          # build and merge so per-cell dereferences can't drift. Only
+          # resolve a branch's SHA when that track is actually active:
+          # otherwise a transient grokability API blip on a tag-only PR
+          # run (or `dispatch track=tag`) would needlessly fail the whole
+          # workflow — including the canonical tag/pinned release build,
+          # which makes zero API calls of its own.
+          # Returns two lines: the FULL commit SHA, then the version
+          # string. The full SHA becomes the build ref (Dockerfile
+          # build-arg) so the codeload tarball is pinned to an immutable
+          # commit — both per-arch builds fetch the exact same source,
+          # and it can't drift from the SHA embedded in the version tag.
+          # The branch name survives only in tags_extra (for the moving
+          # `master` / `develop` / `nightly` tags).
+          resolve_branch() {
+            local branch="$1"
+            local sha
+            sha=$(gh api "repos/grokability/snipe-it/commits/${branch}" --jq '.sha')
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+              echo "error: could not resolve SHA for grokability/snipe-it@${branch}" >&2
+              return 1
+            fi
+            printf '%s\n%s\n' "$sha" "${branch}-${DATE_TAG}-${sha:0:7}"
+          }
+          MASTER_REF=""
+          MASTER_VERSION=""
+          DEVELOP_REF=""
+          DEVELOP_VERSION=""
+          if tracks_has master; then
+            master_out=$(resolve_branch master) || exit 1
+            MASTER_REF=$(printf '%s\n' "$master_out" | sed -n 1p)
+            MASTER_VERSION=$(printf '%s\n' "$master_out" | sed -n 2p)
+          fi
+          if tracks_has develop; then
+            develop_out=$(resolve_branch develop) || exit 1
+            DEVELOP_REF=$(printf '%s\n' "$develop_out" | sed -n 1p)
+            DEVELOP_VERSION=$(printf '%s\n' "$develop_out" | sed -n 2p)
+          fi
+
+          # Build per-track facts JSON for jq to consume below.
+          PER_TRACK=$(jq -n \
+              --arg tag_ref         "$TAG_REF" \
+              --arg tag_version     "$TAG_VERSION" \
+              --arg tag_major       "$TAG_MAJOR" \
+              --arg tag_major_minor "$TAG_MAJOR_MINOR" \
+              --arg master_ref      "$MASTER_REF" \
+              --arg master_version  "$MASTER_VERSION" \
+              --arg develop_ref     "$DEVELOP_REF" \
+              --arg develop_version "$DEVELOP_VERSION" \
+              '{
+                tag: {
+                  ref_source: "file",
+                  tags_extra: "",
+                  ref:         $tag_ref,
+                  version:     $tag_version,
+                  major:       $tag_major,
+                  major_minor: $tag_major_minor
+                },
+                master: {
+                  ref_source: "master",
+                  tags_extra: "master",
+                  ref:         $master_ref,
+                  version:     $master_version,
+                  major:       "",
+                  major_minor: ""
+                },
+                develop: {
+                  ref_source: "develop",
+                  tags_extra: "develop,nightly",
+                  ref:         $develop_ref,
+                  version:     $develop_version,
+                  major:       "",
+                  major_minor: ""
+                }
+              }')
+
           # tag/rolling is structurally impossible to be green: snipe-it's
           # tagged composer.json carries a `symfony/dom-crawler ^4.4`
           # constraint, and Composer's `block-insecure-packages` (default
@@ -113,280 +246,56 @@ jobs:
           # remediated 4.4.46+ once Symfony publishes it).
           # No specific upstream issue exists yet — filtered search:
           # https://github.com/grokability/snipe-it/issues?q=is%3Aissue+symfony%2Fdom-crawler
-          # (related but distinct: closed #19054 was about composer
-          # dependencies after the 8.5 upgrade, not this advisory).
           # Until then the cell is excluded so CI is genuinely green;
           # master/rolling and develop/rolling still exercise the
           # rolling-deps path against their HEAD constraints, which is
           # where any new transitive CVE would surface first.
-          - track: *tag-track
-            composer: rolling
-    steps:
-      - name: Filter — should this track run?
-        id: gate
-        env:
-          EVENT: ${{ github.event_name }}
-          TRACK: ${{ matrix.track.name }}
-          INPUT_TRACK: ${{ inputs.track }}
-        run: |
-          # PR: only `tag` — keep CI fast.
-          if [ "$EVENT" = "pull_request" ] && [ "$TRACK" != "tag" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # workflow_dispatch with explicit track: only that track.
-          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_TRACK" ] \
-              && [ "$INPUT_TRACK" != "all" ] && [ "$INPUT_TRACK" != "$TRACK" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
+          INCLUDE=$(jq -nc --argjson per_track "$PER_TRACK" \
+              --argjson tracks "$(printf '%s\n' "${TRACKS[@]}" | jq -R . | jq -sc .)" \
+              '[
+                $tracks[] as $t
+                | ["pinned","rolling"][] as $c
+                | select(($t == "tag" and $c == "rolling") | not)
+                | $per_track[$t] + {
+                    track: $t,
+                    composer: $c
+                  }
+              ]')
 
-      - name: Checkout
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
+          CELL_MATRIX=$(jq -nc --argjson include "$INCLUDE" '{include: $include}')
 
-      - name: Resolve build ref for this track
-        if: steps.gate.outputs.skip != 'true'
-        id: ref
-        env:
-          # Inputs are passed via env vars (NOT shell interpolation) so that
-          # workflow_dispatch values containing shell metacharacters can't
-          # become command injection. SonarCloud rule githubactions:S7630.
-          #
-          # MUST stay byte-identical to the merge job's "Resolve build
-          # ref" step (around line 420) — divergence between the two
-          # produces wrong tag names. Tracked for refactor into a single
-          # upstream `resolve` job that both consume.
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REF_SOURCE: ${{ matrix.track.ref_source }}
-          INPUT_VERSION: ${{ inputs.snipe_it_version }}
-          TRACK_NAME: ${{ matrix.track.name }}
-        run: |
-          if [ "$REF_SOURCE" = "file" ]; then
-            if [ -n "$INPUT_VERSION" ]; then
-              REF="$INPUT_VERSION"
-            else
-              REF=$(tr -d '[:space:]' < .snipe-it-version)
-            fi
-            VERSION="${REF#v}"                       # strip leading v for image tags
-            MAJOR=$(echo "$VERSION" | cut -d. -f1)
-            MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
-            IS_TAG=true
-          else
-            # Resolve current upstream SHA for the branch (master / develop)
-            REF="$REF_SOURCE"
-            SHA=$(gh api "repos/grokability/snipe-it/commits/${REF_SOURCE}" --jq '.sha')
-            VERSION="${REF_SOURCE}-$(date -u +%Y%m%d)-${SHA:0:7}"
-            MAJOR=""
-            MAJOR_MINOR=""
-            IS_TAG=false
-          fi
+          # ─ Outputs ──────────────────────────────────────────────────
           {
-            echo "ref=$REF"
-            echo "version=$VERSION"
-            echo "major=$MAJOR"
-            echo "major_minor=$MAJOR_MINOR"
-            echo "is_tag=$IS_TAG"
-            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "date_tag=$(date -u +'%Y%m%d')"
-          } >> "$GITHUB_OUTPUT"
-          echo "Resolved: track=$TRACK_NAME ref=$REF version=$VERSION"
-
-      # QEMU intentionally NOT installed: native amd64 + arm64 runners
-      # build their own platform. The previous emulated arm64 build on
-      # ubuntu-latest added ~25 min to wall-time per cell.
-
-      - name: Set up Docker Buildx
-        if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - name: Log in to ghcr.io
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute image tags (tag-stream)
-        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source == 'file'
-        id: tags_tag
-        env:
-          # All ${{ ... }} interpolation goes through env vars rather than
-          # directly into the run-script body — sonarcloud rule
-          # githubactions:S7630 (shell injection).
-          IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
-          COMPOSER_MODE: ${{ matrix.composer }}
-          REF_VERSION: ${{ steps.ref.outputs.version }}
-          REF_DATE_TAG: ${{ steps.ref.outputs.date_tag }}
-          REF_MAJOR_MINOR: ${{ steps.ref.outputs.major_minor }}
-          REF_MAJOR: ${{ steps.ref.outputs.major }}
-          IS_MAIN_REF: ${{ github.ref == 'refs/heads/main' }}
-        run: |
-          # Suffix derived from composer mode:
-          #   pinned  -> '' (bare tags — 8.5.0, 8.5, 8, latest)
-          #   rolling -> '-rolling' (8.5.0-rolling, 8.5-rolling, 8-rolling, rolling)
-          SUF=""
-          LATEST="latest"
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-            LATEST="rolling"
-          fi
-          ENABLE_LATEST="false"
-          if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
-            ENABLE_LATEST="true"
-          fi
-          {
-            echo "tags<<__EOF__"
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
-            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
-            echo "type=raw,value=${REF_MAJOR}${SUF}"
-            # `latest` (pinned) / `rolling` (rolling-latest) only when the build
-            # is from the .snipe-it-version file AND ref is main.
-            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
+            echo "date_tag=$DATE_TAG"
+            echo "build_date=$BUILD_DATE"
+            echo "is_release_from_file=$IS_RELEASE_FROM_FILE"
+            echo "is_main_ref=$IS_MAIN_REF"
+            echo "fork_pr=$FORK_PR"
+            echo "push_artifacts=$PUSH_ARTIFACTS"
+            echo "registry=$REGISTRY"
+            echo "image_name=$IMAGE_NAME"
+            echo "cell-matrix=$CELL_MATRIX"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Compute image tags (branch-stream)
-        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source != 'file'
-        id: tags_branch
-        env:
-          COMPOSER_MODE: ${{ matrix.composer }}
-          TAGS_EXTRA: ${{ matrix.track.tags_extra }}
-          REF_VERSION: ${{ steps.ref.outputs.version }}
-        run: |
-          SUF=""
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-          fi
-          # master / develop builds — branch tags + dated snapshot, no latest/major
-          {
-            echo "tags<<__EOF__"
-            # shellcheck disable=SC2086 # word-split intentional on comma list
-            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
-              echo "type=raw,value=${t}${SUF}"
-            done
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
+          echo "─ active cells ─"
+          jq -r '.include[] | "  \(.track)/\(.composer)  ref=\(.ref) version=\(.version)"' <<<"$CELL_MATRIX"
 
-      - name: Extract metadata
-        if: steps.gate.outputs.skip != 'true'
-        id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
-          labels: |
-            org.opencontainers.image.title=snipe-it-php-fpm
-            org.opencontainers.image.description=Hardened Snipe-IT ${{ steps.ref.outputs.ref }} on PHP 8.5 / Alpine
-            org.opencontainers.image.version=${{ steps.ref.outputs.version }}
-            org.opencontainers.image.created=${{ steps.ref.outputs.build_date }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.licenses=AGPL-3.0-or-later
-
-      - name: Build (by digest, no tags yet — tags pushed by merge job)
-        if: steps.gate.outputs.skip != 'true'
-        id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
-        with:
-          context: .
-          platforms: linux/${{ matrix.platform.arch }}
-          target: runtime
-          # Push by digest only: no human-readable tag is attached to
-          # this per-platform manifest. The merge job downloads all
-          # per-arch digests and creates a single multi-arch manifest
-          # list with the actual tags. Skipped entirely on PR events
-          # (push: false) so PRs never write to the registry.
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SNIPE_IT_VERSION=${{ steps.ref.outputs.ref }}
-            BUILD_DATE=${{ steps.ref.outputs.build_date }}
-            VCS_REF=${{ github.sha }}
-            ROLLING_DEPS=${{ matrix.composer == 'rolling' }}
-          # BuildKit secret. Picked up by the Dockerfile's composer install
-          # RUN via `--mount=type=secret,id=GH_TOKEN` and used to authenticate
-          # api.github.com fetches during dependency resolution. Without it,
-          # parallel matrix cells share the anonymous 60-req/h rate limit and
-          # randomly fail on "Could not authenticate against github.com".
-          # GITHUB_TOKEN is scoped to this job and expires when the job ends.
-          #
-          # Withheld on pull_request events FROM FORKS: a hostile fork PR
-          # could otherwise modify the Dockerfile to exfiltrate the token
-          # via the secret mount. Same-repo PRs still get the token —
-          # those contributors are trusted (commit / push access already
-          # granted), and the anonymous 60-req/h cap no longer covers
-          # `composer require` dep-resolution added in PR #21 (it failed
-          # AuthHelper after exhausting the anonymous budget). For forks,
-          # CI falls back to anonymous and may flake on rate-limit; the
-          # Dockerfile's retry loop absorbs transient blips. Originally
-          # flagged on PR netresearch/snipe-it-docker-compose-stack#16.
-          secrets: |
-            GH_TOKEN=${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GITHUB_TOKEN || '' }}
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }}
-          cache-to: type=gha,scope=${{ matrix.track.name }}-${{ matrix.composer }},mode=max
-
-      # Attest the per-arch image too — keeps `gh attestation verify`
-      # working when consumers do arch-pinned verification (resolve tag
-      # → pull per-arch digest → verify that digest). The merge job
-      # ALSO attests the multi-arch index digest, so both verification
-      # surfaces stay green. Mirrors the cosign --recursive call in
-      # merge that signs both the index and its children.
-      - name: Attest per-arch image
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
-          push-to-registry: true
-
-      # Per-arch digest export. The merge job downloads every per-arch
-      # artifact for a given (track, composer) and joins them into one
-      # multi-arch manifest with `docker buildx imagetools create`, then
-      # signs the index digest (and per-arch children via --recursive).
-      - name: Export per-arch digest
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          mkdir -p /tmp/digests
-          # File name is the digest minus the algorithm prefix, content
-          # is empty — the file's existence + its name is the payload.
-          touch "/tmp/digests/${DIGEST#sha256:}"
-
-      - name: Upload per-arch digest artifact
-        if: steps.gate.outputs.skip != 'true' && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: digests-${{ matrix.track.name }}-${{ matrix.composer }}-${{ matrix.platform.arch }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # ─ Merge per-arch digests into a single multi-arch manifest list ───────
-  # Runs once per (track, composer) cell after all per-arch builds in
-  # that cell complete. Downloads all digest artifacts for the cell,
-  # creates the manifest list with the canonical tags, and pushes it.
-  # Then runs attestation + cosign signing on the merged manifest.
-  merge:
-    name: merge (${{ matrix.track.name }}/${{ matrix.composer }})
-    # `!cancelled()` (instead of default success-required) lets each
-    # (track, composer) merge cell run independently of the build job's
-    # overall pass/fail. The 2-digest guard below catches the per-cell
-    # case where the build for THIS cell didn't produce both digests —
-    # so a failed pinned cell can't block a successful rolling cell from
-    # merging into its manifest.
-    if: github.event_name != 'pull_request' && !cancelled()
-    needs: build
-    runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.composer == 'rolling' }}
+  # ─ Orchestrator: one reusable-workflow call per (track, composer) cell ─
+  # Each call's internal `build` matrix fans out to 2 per-arch jobs and
+  # its internal `merge` job has `needs: build` against ONLY those 2 jobs.
+  # So merge for e.g. master/rolling starts as soon as its amd64+arm64
+  # are done — no waiting on unrelated slow cells. Resolves issue #29.
+  cell:
+    name: cell (${{ matrix.track }}, ${{ matrix.composer }})
+    needs: resolve
+    # Note: reusable-workflow caller jobs don't accept `continue-on-error`
+    # (GHA only allows: name, uses, with, secrets, needs, if, permissions).
+    # The rolling soft-fail semantic is enforced inside _build-cell.yml on
+    # each of its jobs via `continue-on-error: ${{ inputs.composer == 'rolling' }}`.
+    # When all inner jobs are continue-on-error, the reusable workflow's
+    # overall conclusion is `success` even if jobs failed — so rolling cell
+    # failures don't bubble up to the orchestrator. fail-fast: false below
+    # additionally keeps a hard pinned-cell failure from cancelling siblings.
     permissions:
       contents: read
       packages: write
@@ -394,277 +303,22 @@ jobs:
       attestations: write
     strategy:
       fail-fast: false
-      matrix:
-        track:
-          - &tag-track-merge
-            name: tag
-            ref_source: file
-            tags_extra: ''
-          - name: master
-            ref_source: master
-            tags_extra: 'master'
-          - name: develop
-            ref_source: develop
-            tags_extra: 'develop,nightly'
-        composer:
-          - pinned
-          - rolling
-        exclude:
-          # Same as the build matrix — tag/rolling is structurally
-          # impossible to be green (symfony/dom-crawler ^4.4 + audit).
-          - track: *tag-track-merge
-            composer: rolling
-    steps:
-      - name: Filter — should this track run?
-        id: gate
-        env:
-          EVENT: ${{ github.event_name }}
-          TRACK: ${{ matrix.track.name }}
-          INPUT_TRACK: ${{ inputs.track }}
-        run: |
-          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_TRACK" ] \
-              && [ "$INPUT_TRACK" != "all" ] && [ "$INPUT_TRACK" != "$TRACK" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Resolve build ref for this track
-        if: steps.gate.outputs.skip != 'true'
-        id: ref
-        env:
-          # MUST stay byte-identical to the build job's "Resolve build
-          # ref" step (around line 149) — divergence between the two
-          # produces wrong tag names. The follow-up to extract this
-          # into a single upstream `resolve` job is tracked separately.
-          # TOCTOU note: branch tracks re-resolve the upstream SHA here
-          # ~12 min after the build job did, so if grokability/master
-          # advances between build start and merge start the manifest
-          # gets tagged with the NEW SHA but the digest came from the
-          # OLD one. Tag-track builds aren't affected (they read the
-          # same .snipe-it-version file content both times).
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REF_SOURCE: ${{ matrix.track.ref_source }}
-          INPUT_VERSION: ${{ inputs.snipe_it_version }}
-          TRACK_NAME: ${{ matrix.track.name }}
-        run: |
-          if [ "$REF_SOURCE" = "file" ]; then
-            if [ -n "$INPUT_VERSION" ]; then
-              REF="$INPUT_VERSION"
-            else
-              REF=$(tr -d '[:space:]' < .snipe-it-version)
-            fi
-            VERSION="${REF#v}"
-            MAJOR=$(echo "$VERSION" | cut -d. -f1)
-            MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1-2)
-            IS_TAG=true
-          else
-            REF="$REF_SOURCE"
-            SHA=$(gh api "repos/grokability/snipe-it/commits/${REF_SOURCE}" --jq '.sha')
-            VERSION="${REF_SOURCE}-$(date -u +%Y%m%d)-${SHA:0:7}"
-            MAJOR=""
-            MAJOR_MINOR=""
-            IS_TAG=false
-          fi
-          {
-            echo "ref=$REF"
-            echo "version=$VERSION"
-            echo "major=$MAJOR"
-            echo "major_minor=$MAJOR_MINOR"
-            echo "is_tag=$IS_TAG"
-            echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "date_tag=$(date -u +'%Y%m%d')"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Download per-arch digests
-        if: steps.gate.outputs.skip != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: /tmp/digests
-          pattern: digests-${{ matrix.track.name }}-${{ matrix.composer }}-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-
-      - name: Log in to ghcr.io
-        if: steps.gate.outputs.skip != 'true'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute image tags (tag-stream)
-        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source == 'file'
-        id: tags_tag
-        env:
-          IS_RELEASE_FROM_FILE: ${{ inputs.snipe_it_version == '' }}
-          COMPOSER_MODE: ${{ matrix.composer }}
-          REF_VERSION: ${{ steps.ref.outputs.version }}
-          REF_DATE_TAG: ${{ steps.ref.outputs.date_tag }}
-          REF_MAJOR_MINOR: ${{ steps.ref.outputs.major_minor }}
-          REF_MAJOR: ${{ steps.ref.outputs.major }}
-          IS_MAIN_REF: ${{ github.ref == 'refs/heads/main' }}
-        run: |
-          SUF=""
-          LATEST="latest"
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-            LATEST="rolling"
-          fi
-          ENABLE_LATEST="false"
-          if [ "$IS_RELEASE_FROM_FILE" = "true" ] && [ "$IS_MAIN_REF" = "true" ]; then
-            ENABLE_LATEST="true"
-          fi
-          {
-            echo "tags<<__EOF__"
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=raw,value=${REF_VERSION}${SUF}-${REF_DATE_TAG}"
-            echo "type=raw,value=${REF_MAJOR_MINOR}${SUF}"
-            echo "type=raw,value=${REF_MAJOR}${SUF}"
-            echo "type=raw,value=${LATEST},enable=${ENABLE_LATEST}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Compute image tags (branch-stream)
-        if: steps.gate.outputs.skip != 'true' && matrix.track.ref_source != 'file'
-        id: tags_branch
-        env:
-          COMPOSER_MODE: ${{ matrix.composer }}
-          TAGS_EXTRA: ${{ matrix.track.tags_extra }}
-          REF_VERSION: ${{ steps.ref.outputs.version }}
-        run: |
-          SUF=""
-          if [ "$COMPOSER_MODE" = "rolling" ]; then
-            SUF="-rolling"
-          fi
-          {
-            echo "tags<<__EOF__"
-            # shellcheck disable=SC2086 # word-split intentional on comma list
-            for t in $(echo "$TAGS_EXTRA" | tr ',' ' '); do
-              echo "type=raw,value=${t}${SUF}"
-            done
-            echo "type=raw,value=${REF_VERSION}${SUF}"
-            echo "type=sha,prefix=sha-${COMPOSER_MODE}-"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Extract metadata
-        if: steps.gate.outputs.skip != 'true'
-        id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: ${{ steps.tags_tag.outputs.tags || steps.tags_branch.outputs.tags }}
-
-      - name: Create + push multi-arch manifest list
-        if: steps.gate.outputs.skip != 'true'
-        id: manifest
-        env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          METADATA_JSON: ${{ steps.meta.outputs.json }}
-        run: |
-          set -euo pipefail
-          # Build the -t flag list from metadata-action's tag output
-          # (JSON array under .tags). Build the per-arch source-image
-          # arguments from the digest files dropped by the build jobs.
-          # Use --tag=<value> (single argv token) instead of `-t <value>`
-          # (two tokens). The previous mapfile-with-"-t X" produced
-          # array elements that were one space-containing string, which
-          # `${TAG_FLAGS[@]}` then passed as a single argv to buildx —
-          # docker would see one arg `-t ghcr.io/...:8.5.0` and fail
-          # flag parsing. The =-form sidesteps that entirely.
-          mapfile -t TAG_FLAGS < <(jq -r '.tags[] | "--tag=\(.)"' <<<"$METADATA_JSON")
-          mapfile -t SRC_REFS < <(
-            find /tmp/digests -maxdepth 1 -type f -printf "${IMAGE}@sha256:%f\n"
-          )
-          # Sanity: we expect exactly 2 per-arch digests (amd64+arm64).
-          # If a build-job arch failed silently — or a pattern-mismatch
-          # on the artifact download dropped a digest — we'd otherwise
-          # publish a degenerate single-arch manifest under the multi-
-          # arch tag. Fail loudly instead.
-          if [ "${#SRC_REFS[@]}" -ne 2 ]; then
-            echo "ERROR: expected 2 per-arch digests, got ${#SRC_REFS[@]}" >&2
-            printf '  %s\n' "${SRC_REFS[@]}" >&2
-            exit 1
-          fi
-          echo "tags:"
-          printf '  %s\n' "${TAG_FLAGS[@]}"
-          echo "sources:"
-          printf '  %s\n' "${SRC_REFS[@]}"
-          # Capture the manifest digest via --metadata-file directly from
-          # buildx instead of a post-hoc `imagetools inspect` of a tag —
-          # avoids an extra registry round-trip + the eventual-consistency
-          # race where the just-pushed manifest may not yet be readable.
-          # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
-          #
-          # NOTE on the jq path: `docker/build-push-action` writes
-          # `containerimage.digest` (flat). `docker buildx imagetools
-          # create --metadata-file` writes `containerimage.descriptor.digest`
-          # (nested). PR #27 used the flat key by mistake — jq returned
-          # null, the empty-digest guard below tripped with "failed to
-          # capture manifest digest from buildx --metadata-file", and
-          # every merge cell on main exited 1 (the per-arch count guard
-          # above was NOT involved — both arches built successfully).
-          # The // fallback covers both schemas in case buildx ever
-          # changes back.
-          docker buildx imagetools create \
-              --metadata-file /tmp/manifest-metadata.json \
-              "${TAG_FLAGS[@]}" "${SRC_REFS[@]}"
-          MANIFEST_DIGEST=$(jq -r '
-              ."containerimage.descriptor".digest //
-              ."containerimage.digest" //
-              empty
-          ' /tmp/manifest-metadata.json)
-          if [ -z "$MANIFEST_DIGEST" ] || [ "$MANIFEST_DIGEST" = "null" ]; then
-            echo "ERROR: failed to capture manifest digest from buildx --metadata-file" >&2
-            cat /tmp/manifest-metadata.json >&2
-            exit 1
-          fi
-          echo "digest=$MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
-
-      - name: Attest build provenance (on multi-arch manifest)
-        # Skip attestation when manifest step couldn't produce a digest —
-        # otherwise rolling-merge soft-failures emit a misleading second
-        # red annotation here.
-        if: steps.gate.outputs.skip != 'true' && steps.manifest.outputs.digest != ''
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.manifest.outputs.digest }}
-          push-to-registry: true
-
-      # ─ Keyless cosign signing on the multi-arch manifest digest ─────────
-      # `attest-build-provenance` and `cosign sign` are NOT duplicates:
-      #   * `attest-build-provenance` attaches an in-toto SLSA predicate
-      #     describing HOW the artefact was built (verifiable via
-      #     `gh attestation verify` or `cosign verify-attestation`).
-      #   * `cosign sign` attaches an OIDC-bound signature proving WHO/WHAT
-      #     workflow signed it (verifiable via `cosign verify` with the
-      #     workflow identity / certificate-identity-regexp).
-      # Both land in the Rekor transparency log; consumers may pin to
-      # either or both depending on their policy engine.
-      - name: Install cosign
-        if: steps.gate.outputs.skip != 'true' && steps.manifest.outputs.digest != ''
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Sign manifest + per-platform children with cosign (keyless / OIDC)
-        if: steps.gate.outputs.skip != 'true' && steps.manifest.outputs.digest != ''
-        env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}
-        run: |
-          # --recursive: also sign every child manifest of the index, so
-          # `cosign verify ghcr.io/.../snipe-it-php-fpm@<per-arch-digest>`
-          # keeps working for consumers that do arch-pinned verification
-          # (resolve tag → pull per-arch digest → verify). Index-only
-          # signing would silently break that admission-control pattern.
-          # Cost: 3 signatures total (1 index + 2 per-arch) — trivial.
-          cosign sign --recursive --yes "$IMAGE_REF"
+      matrix: ${{ fromJson(needs.resolve.outputs.cell-matrix) }}
+    uses: ./.github/workflows/_build-cell.yml
+    with:
+      track: ${{ matrix.track }}
+      composer: ${{ matrix.composer }}
+      ref_source: ${{ matrix.ref_source }}
+      tags_extra: ${{ matrix.tags_extra }}
+      ref: ${{ matrix.ref }}
+      version: ${{ matrix.version }}
+      major: ${{ matrix.major }}
+      major_minor: ${{ matrix.major_minor }}
+      build_date: ${{ needs.resolve.outputs.build_date }}
+      date_tag: ${{ needs.resolve.outputs.date_tag }}
+      registry: ${{ needs.resolve.outputs.registry }}
+      image_name: ${{ needs.resolve.outputs.image_name }}
+      is_main_ref: ${{ needs.resolve.outputs.is_main_ref == 'true' }}
+      is_release_from_file: ${{ needs.resolve.outputs.is_release_from_file == 'true' }}
+      fork_pr: ${{ needs.resolve.outputs.fork_pr == 'true' }}
+      push_artifacts: ${{ needs.resolve.outputs.push_artifacts == 'true' }}
