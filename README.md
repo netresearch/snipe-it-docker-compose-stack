@@ -3,6 +3,13 @@
 
 # Snipe-IT Docker Compose Stack
 
+> [!WARNING]
+> **This project is no longer maintained.**
+>
+> Netresearch has moved away from Snipe-IT to [GLPI](https://github.com/glpi-project/glpi) for asset management. As a result, this repository is **archived** and will receive no further updates, security patches, or support.
+>
+> The code remains available for reference and you are welcome to fork it, but use it at your own risk.
+
 [![Build](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/build.yml/badge.svg)](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/build.yml)
 [![Lint](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/lint.yml/badge.svg)](https://github.com/netresearch/snipe-it-docker-compose-stack/actions/workflows/lint.yml)
 [![Code: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE-MIT)
